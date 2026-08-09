@@ -2,14 +2,11 @@
 //  ContentView.swift
 //  OpenStar
 //
-//  Created by Cody Peter on 8/9/26.
-//
 
 import SwiftUI
 
 struct ContentView: View {
-    @State private var manager =
-        ContributionManager()
+    @State private var manager = ContributionManager()
 
     var body: some View {
         NavigationStack {
@@ -17,7 +14,8 @@ struct ContentView: View {
                 VStack(spacing: 24) {
                     header
                     contributionCard
-                    performanceCard
+                    projectCard
+                    discoveryCard
                     networkCard
                     deviceCard
                     statisticsCard
@@ -38,7 +36,7 @@ struct ContentView: View {
                 .font(.title2.bold())
 
             Text(
-                "Help process open scientific workloads using idle compute on this device."
+                "Help analyze real astronomical observations using this device."
             )
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -49,10 +47,7 @@ struct ContentView: View {
     private var contributionCard: some View {
         VStack(spacing: 18) {
             HStack {
-                VStack(
-                    alignment: .leading,
-                    spacing: 4
-                ) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Node Status")
                         .font(.headline)
 
@@ -92,106 +87,164 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .disabled(
+                manager.projectStatus?.isComplete == true
+            )
         }
         .padding()
         .background(.regularMaterial)
         .clipShape(
-            RoundedRectangle(
-                cornerRadius: 18
-            )
+            RoundedRectangle(cornerRadius: 18)
         )
     }
 
-    private var performanceCard: some View {
-        VStack(
-            alignment: .leading,
-            spacing: 14
-        ) {
-            Text("GPU Performance")
+    private var projectCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Science Project")
                 .font(.headline)
 
-            if let gflops =
-                manager.lastGFLOPS {
+            if let status = manager.projectStatus {
+                infoRow(
+                    "Target",
+                    status.targetName
+                )
+
+                infoRow(
+                    "Workload",
+                    status.workloadID
+                )
+
+                HStack {
+                    Text("Progress")
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text(
+                        "\(Int(status.progress * 100))%"
+                    )
+                    .monospacedDigit()
+                }
+
+                ProgressView(
+                    value: status.progress
+                )
+
+                infoRow(
+                    "Completed",
+                    "\(status.completedWorkUnits) / \(status.totalWorkUnits)"
+                )
+
+                infoRow(
+                    "Pending",
+                    "\(status.pendingWorkUnits)"
+                )
+
+                infoRow(
+                    "Assigned",
+                    "\(status.assignedWorkUnits)"
+                )
+
+                infoRow(
+                    "Retries",
+                    "\(status.retryCount)"
+                )
+            } else {
+                Text(
+                    "Connect to the coordinator to load the current science project."
+                )
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.regularMaterial)
+        .clipShape(
+            RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private var discoveryCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Best Candidate")
+                .font(.headline)
+
+            if let period =
+                manager.bestCandidatePeriodDays {
                 HStack(
-                    alignment:
-                        .firstTextBaseline
+                    alignment: .firstTextBaseline
                 ) {
                     Text(
-                        gflops,
-                        format:
-                            .number.precision(
-                                .fractionLength(1)
-                            )
+                        period,
+                        format: .number.precision(
+                            .fractionLength(6)
+                        )
                     )
                     .font(
                         .system(
-                            size: 38,
+                            size: 34,
                             weight: .bold,
                             design: .rounded
                         )
                     )
                     .monospacedDigit()
 
-                    Text("GFLOP/s")
-                        .foregroundStyle(
-                            .secondary
+                    Text("days")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let frequency =
+                    manager.bestCandidateFrequency {
+                    infoRow(
+                        "Frequency",
+                        String(
+                            format: "%.6f cycles/day",
+                            frequency
                         )
+                    )
+                }
+
+                if let power =
+                    manager.bestCandidatePower {
+                    infoRow(
+                        "Signal Power",
+                        String(
+                            format: "%.6f",
+                            power
+                        )
+                    )
                 }
             } else {
                 Text(
-                    "Waiting for the first network work unit."
+                    "No candidate has been measured yet."
                 )
-                .foregroundStyle(
-                    .secondary
-                )
-            }
-
-            if let best =
-                manager.bestGFLOPS {
-                infoRow(
-                    "Best",
-                    String(
-                        format: "%.1f GFLOP/s",
-                        best
-                    )
-                )
+                .foregroundStyle(.secondary)
             }
         }
         .padding()
         .background(.regularMaterial)
         .clipShape(
-            RoundedRectangle(
-                cornerRadius: 18
-            )
+            RoundedRectangle(cornerRadius: 18)
         )
     }
 
     private var networkCard: some View {
-        VStack(
-            alignment: .leading,
-            spacing: 14
-        ) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Network")
                 .font(.headline)
 
             infoRow(
                 "Registered",
-                manager.isRegistered
-                    ? "Yes"
-                    : "No"
+                manager.isRegistered ? "Yes" : "No"
             )
 
             infoRow(
                 "Node",
                 String(
-                    manager.nodeID
-                        .uuidString
-                        .prefix(8)
+                    manager.nodeID.uuidString.prefix(8)
                 )
             )
 
-            if let project =
-                manager.currentProject {
+            if let project = manager.currentProject {
                 infoRow(
                     "Project",
                     project
@@ -203,9 +256,7 @@ struct ContentView: View {
                 infoRow(
                     "Work Unit",
                     String(
-                        workID
-                            .uuidString
-                            .prefix(8)
+                        workID.uuidString.prefix(8)
                     )
                 )
             }
@@ -213,17 +264,12 @@ struct ContentView: View {
         .padding()
         .background(.regularMaterial)
         .clipShape(
-            RoundedRectangle(
-                cornerRadius: 18
-            )
+            RoundedRectangle(cornerRadius: 18)
         )
     }
 
     private var deviceCard: some View {
-        VStack(
-            alignment: .leading,
-            spacing: 14
-        ) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("This Device")
                 .font(.headline)
 
@@ -234,8 +280,7 @@ struct ContentView: View {
 
             infoRow(
                 "Hardware",
-                manager.capabilities
-                    .machineIdentifier
+                manager.capabilities.machineIdentifier
             )
 
             infoRow(
@@ -252,37 +297,29 @@ struct ContentView: View {
                 "Memory",
                 String(
                     format: "%.1f GB",
-                    manager.capabilities
-                        .memoryGB
+                    manager.capabilities.memoryGB
                 )
             )
 
             infoRow(
                 "Thermal State",
-                manager.capabilities
-                    .thermalState
+                manager.capabilities.thermalState
             )
 
             infoRow(
                 "Power",
-                manager.capabilities
-                    .powerState
+                manager.capabilities.powerState
             )
         }
         .padding()
         .background(.regularMaterial)
         .clipShape(
-            RoundedRectangle(
-                cornerRadius: 18
-            )
+            RoundedRectangle(cornerRadius: 18)
         )
     }
 
     private var statisticsCard: some View {
-        VStack(
-            alignment: .leading,
-            spacing: 14
-        ) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Contribution")
                 .font(.headline)
 
@@ -299,7 +336,7 @@ struct ContentView: View {
             infoRow(
                 "GPU Compute Time",
                 String(
-                    format: "%.2f sec",
+                    format: "%.3f sec",
                     manager.totalComputeSeconds
                 )
             )
@@ -309,19 +346,8 @@ struct ContentView: View {
                 infoRow(
                     "Last Work Unit",
                     String(
-                        format: "%.3f sec",
+                        format: "%.4f sec",
                         duration
-                    )
-                )
-            }
-
-            if let checksum =
-                manager.lastChecksum {
-                infoRow(
-                    "Result Checksum",
-                    String(
-                        format: "%.3f",
-                        checksum
                     )
                 )
             }
@@ -329,9 +355,7 @@ struct ContentView: View {
         .padding()
         .background(.regularMaterial)
         .clipShape(
-            RoundedRectangle(
-                cornerRadius: 18
-            )
+            RoundedRectangle(cornerRadius: 18)
         )
     }
 
@@ -341,16 +365,12 @@ struct ContentView: View {
     ) -> some View {
         HStack {
             Text(title)
-                .foregroundStyle(
-                    .secondary
-                )
+                .foregroundStyle(.secondary)
 
             Spacer()
 
             Text(value)
-                .multilineTextAlignment(
-                    .trailing
-                )
+                .multilineTextAlignment(.trailing)
                 .monospacedDigit()
         }
     }

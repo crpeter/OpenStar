@@ -1,16 +1,6 @@
 //
-//  ContributionManager 2.swift
-//  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
-//
-
-
-//
 //  ContributionManager.swift
 //  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
 //
 
 import Foundation
@@ -24,16 +14,16 @@ final class ContributionManager {
 
     private(set) var unitsCompleted = 0
     private(set) var unitsAccepted = 0
-
     private(set) var totalComputeSeconds: Double = 0
 
     private(set) var lastWorkUnitDuration: Double?
-    private(set) var lastGFLOPS: Double?
-    private(set) var bestGFLOPS: Double?
-    private(set) var lastChecksum: Double?
+    private(set) var bestCandidateFrequency: Double?
+    private(set) var bestCandidatePeriodDays: Double?
+    private(set) var bestCandidatePower: Double?
 
     private(set) var currentProject: String?
     private(set) var currentWorkUnitID: UUID?
+    private(set) var projectStatus: ProjectStatus?
 
     private(set) var errorMessage: String?
 
@@ -45,11 +35,11 @@ final class ContributionManager {
     private let coordinator: CoordinatorClient
     private let workloadRouter: WorkloadRouter?
 
+    private var datasets: [String: AstronomyDataset] = [:]
     private var task: Task<Void, Never>?
 
     init() {
         nodeID = NodeIdentity.id
-
         coordinator = CoordinatorClient()
 
         do {
@@ -65,9 +55,13 @@ final class ContributionManager {
             return errorMessage
         }
 
+        if projectStatus?.isComplete == true {
+            return "Science project complete"
+        }
+
         if isContributing {
             if currentWorkUnitID != nil {
-                return "Computing"
+                return "Searching TESS data"
             }
 
             return "Waiting for work"
@@ -82,9 +76,7 @@ final class ContributionManager {
         }
 
         guard let workloadRouter else {
-            errorMessage =
-                "Compute worker is unavailable."
-
+            errorMessage = "Compute worker is unavailable."
             return
         }
 
@@ -98,163 +90,123 @@ final class ContributionManager {
 
             do {
                 try await registerNode()
+                try await refreshProjectStatus()
 
                 while !Task.isCancelled {
-                    capabilities =
-                        DeviceCapabilities.current()
+                    if projectStatus?.isComplete == true {
+                        break
+                    }
 
-                    guard let workUnit =
-                        try await coordinator.claimWork(
-                            nodeID: nodeID
-                        )
-                    else {
+                    capabilities = DeviceCapabilities.current()
+
+                    guard let workUnit = try await coordinator.claimWork(
+                        nodeID: nodeID
+                    ) else {
+                        try await refreshProjectStatus()
+
+                        if projectStatus?.isComplete == true {
+                            break
+                        }
+
                         try await Task.sleep(
-                            for: .seconds(2)
+                            for: .seconds(1)
                         )
 
                         continue
                     }
 
-                    currentProject =
-                        workUnit.projectID
-
-                    currentWorkUnitID =
-                        workUnit.id
+                    currentProject = workUnit.projectID
+                    currentWorkUnitID = workUnit.id
 
                     print(
                         "⭐️ [OpenStar] Claimed \(workUnit.id)"
                     )
 
                     do {
-                        let result =
-                            try await workloadRouter.execute(
-                                workUnit: workUnit
-                            )
+                        let dataset = try await dataset(
+                            id: workUnit.datasetID
+                        )
+
+                        let result = try await workloadRouter.execute(
+                            workUnit: workUnit,
+                            dataset: dataset
+                        )
 
                         try Task.checkCancellation()
 
                         unitsCompleted += 1
+                        totalComputeSeconds += result.duration
+                        lastWorkUnitDuration = result.duration
 
-                        totalComputeSeconds +=
-                            result.duration
-
-                        lastWorkUnitDuration =
-                            result.duration
-
-                        lastGFLOPS =
-                            result.estimatedGFLOPS
-
-                        lastChecksum =
-                            result.checksum
-
-                        if let currentBest =
-                            bestGFLOPS {
-                            bestGFLOPS = max(
-                                currentBest,
-                                result.estimatedGFLOPS
-                            )
-                        } else {
-                            bestGFLOPS =
-                                result.estimatedGFLOPS
+                        if bestCandidatePower == nil ||
+                            result.bestPower > bestCandidatePower! {
+                            bestCandidatePower = result.bestPower
+                            bestCandidateFrequency = result.bestFrequency
+                            bestCandidatePeriodDays = result.bestPeriodDays
                         }
 
-                        let networkResult =
-                            WorkResult(
-                                workUnitID:
-                                    workUnit.id,
-                                nodeID:
-                                    nodeID,
-                                status:
-                                    .completed,
-                                duration:
-                                    result.duration,
-                                estimatedGFLOPS:
-                                    result
-                                        .estimatedGFLOPS,
-                                checksum:
-                                    result.checksum,
-                                verificationValue:
-                                    result
-                                        .verificationValue,
-                                errorMessage:
-                                    nil
-                            )
+                        let networkResult = WorkResult(
+                            workUnitID: workUnit.id,
+                            nodeID: nodeID,
+                            status: .completed,
+                            duration: result.duration,
+                            bestFrequency: result.bestFrequency,
+                            bestPeriodDays: result.bestPeriodDays,
+                            bestPower: result.bestPower,
+                            errorMessage: nil
+                        )
 
-                        let receipt =
-                            try await coordinator.submit(
-                                result: networkResult
-                            )
+                        let receipt = try await coordinator.submit(
+                            result: networkResult
+                        )
 
                         if receipt.accepted {
                             unitsAccepted += 1
                         }
 
                         print(
-                            """
-                            ⭐️ [OpenStar] Server response: \
-                            \(receipt.message)
-                            """
+                            "⭐️ [OpenStar] Server response: \(receipt.message)"
                         )
-
                     } catch is CancellationError {
                         break
-
                     } catch {
-                        let failedResult =
-                            WorkResult(
-                                workUnitID:
-                                    workUnit.id,
-                                nodeID:
-                                    nodeID,
-                                status:
-                                    .failed,
-                                duration:
-                                    nil,
-                                estimatedGFLOPS:
-                                    nil,
-                                checksum:
-                                    nil,
-                                verificationValue:
-                                    nil,
-                                errorMessage:
-                                    error
-                                        .localizedDescription
-                            )
+                        let failedResult = WorkResult(
+                            workUnitID: workUnit.id,
+                            nodeID: nodeID,
+                            status: .failed,
+                            duration: nil,
+                            bestFrequency: nil,
+                            bestPeriodDays: nil,
+                            bestPower: nil,
+                            errorMessage: error.localizedDescription
+                        )
 
                         _ = try? await coordinator.submit(
                             result: failedResult
                         )
 
                         print(
-                            """
-                            ⭐️ [OpenStar] Work unit failed: \
-                            \(error)
-                            """
+                            "⭐️ [OpenStar] Work unit failed: \(error)"
                         )
                     }
 
                     currentWorkUnitID = nil
 
+                    try await refreshProjectStatus()
+
                     await Task.yield()
                 }
-
             } catch is CancellationError {
                 // Expected when Stop is pressed.
-
             } catch {
-                errorMessage =
-                    error.localizedDescription
+                errorMessage = error.localizedDescription
 
                 print(
-                    """
-                    ⭐️ [OpenStar] Contribution error: \
-                    \(error)
-                    """
+                    "⭐️ [OpenStar] Contribution error: \(error)"
                 )
             }
 
             currentWorkUnitID = nil
-            currentProject = nil
             isContributing = false
             task = nil
         }
@@ -266,31 +218,58 @@ final class ContributionManager {
     }
 
     private func registerNode() async throws {
-        capabilities =
-            DeviceCapabilities.current()
+        capabilities = DeviceCapabilities.current()
 
-        let response =
-            try await coordinator.register(
-                nodeID: nodeID,
-                capabilities:
-                    capabilities.networkCapabilities
-            )
+        let response = try await coordinator.register(
+            nodeID: nodeID,
+            capabilities: capabilities.networkCapabilities
+        )
 
         guard response.accepted else {
-            throw CoordinatorClientError
-                .serverError(
-                    statusCode: 400,
-                    message: response.message
-                )
+            throw CoordinatorClientError.serverError(
+                statusCode: 400,
+                message: response.message
+            )
         }
 
         isRegistered = true
 
         print(
-            """
-            ⭐️ [OpenStar] Node registered: \
-            \(nodeID)
-            """
+            "⭐️ [OpenStar] Node registered: \(nodeID)"
         )
+    }
+
+    private func dataset(
+        id: String
+    ) async throws -> AstronomyDataset {
+        if let cached = datasets[id] {
+            return cached
+        }
+
+        print(
+            "🔭 [OpenStar] Downloading dataset \(id)"
+        )
+
+        let downloaded = try await coordinator.dataset(
+            id: id
+        )
+
+        datasets[id] = downloaded
+
+        print(
+            "🔭 [OpenStar] Dataset loaded: \(downloaded.times.count) samples"
+        )
+
+        return downloaded
+    }
+
+    private func refreshProjectStatus() async throws {
+        projectStatus =
+            try await coordinator.projectStatus()
+
+        if let projectStatus {
+            currentProject =
+                projectStatus.projectID
+        }
     }
 }

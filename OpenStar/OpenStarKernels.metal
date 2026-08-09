@@ -2,37 +2,91 @@
 //  OpenStarKernels.metal
 //  OpenStar
 //
-//  Created by Cody Peter on 8/9/26.
-//
 
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void openStarBenchmark(
-    device const float *input [[buffer(0)]],
-    device float *output [[buffer(1)]],
-    constant uint &iterationCount [[buffer(2)]],
+kernel void openStarLombScargle(
+    device const float *times [[buffer(0)]],
+    device const float *flux [[buffer(1)]],
+    device float *powers [[buffer(2)]],
+    constant uint &sampleCount [[buffer(3)]],
+    constant float &startFrequency [[buffer(4)]],
+    constant float &frequencyStep [[buffer(5)]],
     uint id [[thread_position_in_grid]]
 ) {
-    float value = input[id];
+    constexpr float twoPi = 6.28318530717958647692f;
 
-    for (
-        uint iteration = 0;
-        iteration < iterationCount;
-        ++iteration
-    ) {
-        value = fma(
-            value,
-            1.0000001f,
-            0.0000002f
-        );
+    float frequency =
+        startFrequency +
+        float(id) * frequencyStep;
 
-        value = fma(
-            value,
-            0.9999999f,
-            0.0000001f
-        );
+    float omega = twoPi * frequency;
+
+    float sumSin2 = 0.0f;
+    float sumCos2 = 0.0f;
+
+    for (uint sample = 0; sample < sampleCount; ++sample) {
+        float angle = 2.0f * omega * times[sample];
+
+        sumSin2 += sin(angle);
+        sumCos2 += cos(angle);
     }
 
-    output[id] = value;
+    float tau = 0.0f;
+
+    if (omega > 0.0f) {
+        tau =
+            atan2(sumSin2, sumCos2) /
+            (2.0f * omega);
+    }
+
+    float sumYCos = 0.0f;
+    float sumYSin = 0.0f;
+
+    float sumCosSquared = 0.0f;
+    float sumSinSquared = 0.0f;
+
+    float totalFluxSquared = 0.0f;
+
+    for (uint sample = 0; sample < sampleCount; ++sample) {
+        float shiftedTime =
+            times[sample] - tau;
+
+        float angle =
+            omega * shiftedTime;
+
+        float cosine = cos(angle);
+        float sine = sin(angle);
+        float value = flux[sample];
+
+        sumYCos += value * cosine;
+        sumYSin += value * sine;
+
+        sumCosSquared += cosine * cosine;
+        sumSinSquared += sine * sine;
+
+        totalFluxSquared += value * value;
+    }
+
+    if (
+        sumCosSquared <= 0.0f ||
+        sumSinSquared <= 0.0f ||
+        totalFluxSquared <= 0.0f
+    ) {
+        powers[id] = 0.0f;
+        return;
+    }
+
+    float cosinePower =
+        (sumYCos * sumYCos) /
+        sumCosSquared;
+
+    float sinePower =
+        (sumYSin * sumYSin) /
+        sumSinSquared;
+
+    powers[id] =
+        (cosinePower + sinePower) /
+        totalFluxSquared;
 }

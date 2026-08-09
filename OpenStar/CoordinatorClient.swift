@@ -1,16 +1,6 @@
 //
-//  CoordinatorClientError.swift
-//  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
-//
-
-
-//
 //  CoordinatorClient.swift
 //  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
 //
 
 import Foundation
@@ -48,25 +38,18 @@ final class CoordinatorClient: @unchecked Sendable {
         nodeID: UUID,
         capabilities: NodeCapabilities
     ) async throws -> NodeRegistrationResponse {
-        let requestBody = NodeRegistrationRequest(
-            nodeID: nodeID,
-            capabilities: capabilities
-        )
-
-        return try await post(
+        try await post(
             path: "v1/nodes/register",
-            body: requestBody,
+            body: NodeRegistrationRequest(
+                nodeID: nodeID,
+                capabilities: capabilities
+            ),
             responseType: NodeRegistrationResponse.self
         )
     }
 
-    func claimWork(
-        nodeID: UUID
-    ) async throws -> WorkUnit? {
-        let url = baseURL
-            .appendingPathComponent("v1")
-            .appendingPathComponent("work")
-            .appendingPathComponent("claim")
+    func claimWork(nodeID: UUID) async throws -> WorkUnit? {
+        let url = makeURL(path: "v1/work/claim")
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -102,16 +85,59 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    func submit(
-        result: WorkResult
-    ) async throws -> ResultReceipt {
-        let path =
-            "v1/work/\(result.workUnitID.uuidString)/result"
+    func dataset(id: String) async throws -> AstronomyDataset {
+        let url = makeURL(
+            path: "v1/datasets/\(id)"
+        )
 
-        return try await post(
-            path: path,
+        let (data, response) = try await session.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CoordinatorClientError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw CoordinatorClientError.serverError(
+                statusCode: httpResponse.statusCode,
+                message: String(decoding: data, as: UTF8.self)
+            )
+        }
+
+        return try JSONDecoder().decode(
+            AstronomyDataset.self,
+            from: data
+        )
+    }
+
+    func submit(result: WorkResult) async throws -> ResultReceipt {
+        try await post(
+            path: "v1/work/\(result.workUnitID.uuidString)/result",
             body: result,
             responseType: ResultReceipt.self
+        )
+    }
+
+    func projectStatus() async throws -> ProjectStatus {
+        let url = makeURL(
+            path: "v1/projects/current/status"
+        )
+
+        let (data, response) = try await session.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CoordinatorClientError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw CoordinatorClientError.serverError(
+                statusCode: httpResponse.statusCode,
+                message: String(decoding: data, as: UTF8.self)
+            )
+        }
+
+        return try JSONDecoder().decode(
+            ProjectStatus.self,
+            from: data
         )
     }
 
@@ -120,16 +146,10 @@ final class CoordinatorClient: @unchecked Sendable {
         body: Request,
         responseType: Response.Type
     ) async throws -> Response {
-        let url = path
-            .split(separator: "/")
-            .reduce(baseURL) {
-                $0.appendingPathComponent(String($1))
-            }
+        let url = makeURL(path: path)
 
         var request = URLRequest(url: url)
-
         request.httpMethod = "POST"
-
         request.setValue(
             "application/json",
             forHTTPHeaderField: "Content-Type"
@@ -154,5 +174,13 @@ final class CoordinatorClient: @unchecked Sendable {
             Response.self,
             from: data
         )
+    }
+
+    private func makeURL(path: String) -> URL {
+        path
+            .split(separator: "/")
+            .reduce(baseURL) {
+                $0.appendingPathComponent(String($1))
+            }
     }
 }

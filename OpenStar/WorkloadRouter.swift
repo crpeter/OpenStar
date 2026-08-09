@@ -1,16 +1,6 @@
 //
-//  WorkloadRouterError.swift
-//  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
-//
-
-
-//
 //  WorkloadRouter.swift
 //  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
 //
 
 import Foundation
@@ -29,26 +19,27 @@ enum WorkloadRouterError: LocalizedError {
 
 nonisolated
 final class WorkloadRouter: @unchecked Sendable {
-    private let metalWorker: MetalComputeWorker
+    private let tessPeriodSearchWorker: TESSPeriodSearchWorker
 
     init() throws {
-        metalWorker = try MetalComputeWorker()
+        tessPeriodSearchWorker = try TESSPeriodSearchWorker()
     }
 
     func execute(
-        workUnit: WorkUnit
-    ) async throws -> MetalBenchmarkResult {
+        workUnit: WorkUnit,
+        dataset: AstronomyDataset
+    ) async throws -> PeriodSearchResult {
         switch workUnit.workloadID {
-        case MetalComputeWorker.workloadID:
-            return try await metalWorker.run(
-                workUnit: workUnit
+        case TESSPeriodSearchWorker.workloadID:
+            return try await tessPeriodSearchWorker.run(
+                workUnit: workUnit,
+                dataset: dataset
             )
 
         default:
-            throw WorkloadRouterError
-                .unsupportedWorkload(
-                    workUnit.workloadID
-                )
+            throw WorkloadRouterError.unsupportedWorkload(
+                workUnit.workloadID
+            )
         }
     }
 }

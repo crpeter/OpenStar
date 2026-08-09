@@ -10,8 +10,6 @@
 //  NetworkModels.swift
 //  OpenStar
 //
-//  Created by Cody Peter on 8/9/26.
-//
 
 import Foundation
 
@@ -46,9 +44,22 @@ struct WorkUnit: Codable, Identifiable, Sendable {
     let id: UUID
     let projectID: String
     let workloadID: String
-    let elementCount: Int
-    let iterationsPerElement: Int
-    let seed: Int
+    let datasetID: String
+    let frequencyStartIndex: Int
+    let startFrequency: Float
+    let frequencyStep: Float
+    let frequencyCount: Int
+}
+
+nonisolated
+struct AstronomyDataset: Codable, Sendable {
+    let id: String
+    let targetName: String
+    let mission: String
+    let timeUnit: String
+    let fluxUnit: String
+    let times: [Float]
+    let flux: [Float]
 }
 
 nonisolated
@@ -64,9 +75,9 @@ struct WorkResult: Codable, Sendable {
     let status: WorkResultStatus
 
     let duration: Double?
-    let estimatedGFLOPS: Double?
-    let checksum: Double?
-    let verificationValue: Float?
+    let bestFrequency: Double?
+    let bestPeriodDays: Double?
+    let bestPower: Double?
 
     let errorMessage: String?
 }
@@ -80,6 +91,9 @@ struct ResultReceipt: Codable, Sendable {
 nonisolated
 struct ProjectStatus: Codable, Sendable {
     let projectID: String
+    let targetName: String
+    let workloadID: String
+
     let totalWorkUnits: Int
     let pendingWorkUnits: Int
     let assignedWorkUnits: Int
@@ -87,8 +101,7 @@ struct ProjectStatus: Codable, Sendable {
     let retryCount: Int
 
     var isComplete: Bool {
-        totalWorkUnits > 0 &&
-        completedWorkUnits == totalWorkUnits
+        totalWorkUnits > 0 && completedWorkUnits == totalWorkUnits
     }
 
     var progress: Double {
@@ -96,7 +109,6 @@ struct ProjectStatus: Codable, Sendable {
             return 0
         }
 
-        return Double(completedWorkUnits) /
-            Double(totalWorkUnits)
+        return Double(completedWorkUnits) / Double(totalWorkUnits)
     }
 }
