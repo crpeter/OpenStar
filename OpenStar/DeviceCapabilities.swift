@@ -1,16 +1,6 @@
 //
-//  DeviceCapabilities 2.swift
-//  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
-//
-
-
-//
 //  DeviceCapabilities.swift
 //  OpenStar
-//
-//  Created by Cody Peter on 8/9/26.
 //
 
 import Foundation
@@ -53,13 +43,23 @@ struct DeviceCapabilities {
         )
     }
 
-    var networkCapabilities: NodeCapabilities {
-        NodeCapabilities(
+    func networkCapabilities(
+        supportedWorkloads: [WorkloadCapability]
+    ) -> NodeCapabilities {
+        var backends: [ComputeBackend] = [.cpu]
+
+        if MTLCreateSystemDefaultDevice() != nil {
+            backends.append(.metal)
+        }
+
+        return NodeCapabilities(
             platform: platform,
             hardwareIdentifier: machineIdentifier,
             gpuName: gpuName,
             processorCount: processorCount,
-            memoryGB: memoryGB
+            memoryGB: memoryGB,
+            computeBackends: backends,
+            workloads: supportedWorkloads
         )
     }
 

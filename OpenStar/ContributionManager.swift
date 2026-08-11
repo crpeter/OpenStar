@@ -2,6 +2,10 @@
 //  ContributionManager.swift
 //  OpenStar
 //
+//  Generic worker-node runtime. It registers capabilities, claims compatible
+//  work, fetches opaque datasets, routes work to the matching workload plugin,
+//  and returns generic result payloads.
+//
 
 import Foundation
 import Observation
@@ -17,11 +21,10 @@ final class ContributionManager {
     private(set) var totalComputeSeconds: Double = 0
 
     private(set) var lastWorkUnitDuration: Double?
-    private(set) var bestCandidateFrequency: Double?
-    private(set) var bestCandidatePeriodDays: Double?
-    private(set) var bestCandidatePower: Double?
+    private(set) var lastResultSummary: WorkloadResultSummary?
 
     private(set) var currentProject: String?
+    private(set) var currentWorkloadID: String?
     private(set) var currentWorkUnitID: UUID?
     private(set) var projectStatus: ProjectStatus?
 
@@ -35,7 +38,7 @@ final class ContributionManager {
     private let coordinator: CoordinatorClient
     private let workloadRouter: WorkloadRouter?
 
-    private var datasets: [String: AstronomyDataset] = [:]
+    private var datasets: [String: Data] = [:]
     private var task: Task<Void, Never>?
 
     init() {
@@ -56,18 +59,22 @@ final class ContributionManager {
         }
 
         if projectStatus?.isComplete == true {
-            return "Science project complete"
+            return "Project complete"
         }
 
         if isContributing {
-            if currentWorkUnitID != nil {
-                return "Searching TESS data"
+            if let currentWorkloadID {
+                return "Computing \(currentWorkloadID)"
             }
 
-            return "Waiting for work"
+            return "Waiting for compatible work"
         }
 
         return "Ready"
+    }
+
+    var supportedWorkloads: [WorkloadCapability] {
+        workloadRouter?.supportedCapabilities ?? []
     }
 
     func start() {
@@ -116,44 +123,48 @@ final class ContributionManager {
                     }
 
                     currentProject = workUnit.projectID
+                    currentWorkloadID = workUnit.workloadID
                     currentWorkUnitID = workUnit.id
 
                     print(
-                        "⭐️ [OpenStar] Claimed \(workUnit.id)"
+                        "⭐️ [OpenStar] Claimed \(workUnit.id) · \(workUnit.workloadID)"
                     )
 
                     do {
-                        let dataset = try await dataset(
-                            id: workUnit.datasetID
-                        )
+                        let data: Data?
 
-                        let result = try await workloadRouter.execute(
+                        if let datasetID = workUnit.datasetID {
+                            data = try await datasetData(
+                                id: datasetID
+                            )
+                        } else {
+                            data = nil
+                        }
+
+                        let execution = try await workloadRouter.execute(
                             workUnit: workUnit,
-                            dataset: dataset
+                            datasetData: data
                         )
 
                         try Task.checkCancellation()
 
                         unitsCompleted += 1
-                        totalComputeSeconds += result.duration
-                        lastWorkUnitDuration = result.duration
+                        totalComputeSeconds += execution.duration
+                        lastWorkUnitDuration = execution.duration
+                        lastResultSummary = execution.summary
 
-                        if bestCandidatePower == nil ||
-                            result.bestPower > bestCandidatePower! {
-                            bestCandidatePower = result.bestPower
-                            bestCandidateFrequency = result.bestFrequency
-                            bestCandidatePeriodDays = result.bestPeriodDays
-                        }
+                        let legacy = execution.legacyResultFields
 
                         let networkResult = WorkResult(
                             workUnitID: workUnit.id,
                             nodeID: nodeID,
                             status: .completed,
-                            duration: result.duration,
-                            bestFrequency: result.bestFrequency,
-                            bestPeriodDays: result.bestPeriodDays,
-                            bestPower: result.bestPower,
-                            errorMessage: nil
+                            duration: execution.duration,
+                            payload: execution.payload,
+                            errorMessage: nil,
+                            bestFrequency: legacy.bestFrequency,
+                            bestPeriodDays: legacy.bestPeriodDays,
+                            bestPower: legacy.bestPower
                         )
 
                         let receipt = try await coordinator.submit(
@@ -175,10 +186,11 @@ final class ContributionManager {
                             nodeID: nodeID,
                             status: .failed,
                             duration: nil,
+                            payload: nil,
+                            errorMessage: error.localizedDescription,
                             bestFrequency: nil,
                             bestPeriodDays: nil,
-                            bestPower: nil,
-                            errorMessage: error.localizedDescription
+                            bestPower: nil
                         )
 
                         _ = try? await coordinator.submit(
@@ -191,6 +203,7 @@ final class ContributionManager {
                     }
 
                     currentWorkUnitID = nil
+                    currentWorkloadID = nil
 
                     try await refreshProjectStatus()
 
@@ -207,6 +220,7 @@ final class ContributionManager {
             }
 
             currentWorkUnitID = nil
+            currentWorkloadID = nil
             isContributing = false
             task = nil
         }
@@ -222,7 +236,9 @@ final class ContributionManager {
 
         let response = try await coordinator.register(
             nodeID: nodeID,
-            capabilities: capabilities.networkCapabilities
+            capabilities: capabilities.networkCapabilities(
+                supportedWorkloads: supportedWorkloads
+            )
         )
 
         guard response.accepted else {
@@ -237,27 +253,33 @@ final class ContributionManager {
         print(
             "⭐️ [OpenStar] Node registered: \(nodeID)"
         )
+
+        for capability in supportedWorkloads {
+            print(
+                "⭐️ [OpenStar] Capability: \(capability.workloadID)"
+            )
+        }
     }
 
-    private func dataset(
+    private func datasetData(
         id: String
-    ) async throws -> AstronomyDataset {
+    ) async throws -> Data {
         if let cached = datasets[id] {
             return cached
         }
 
         print(
-            "🔭 [OpenStar] Downloading dataset \(id)"
+            "⭐️ [OpenStar] Downloading dataset \(id)"
         )
 
-        let downloaded = try await coordinator.dataset(
+        let downloaded = try await coordinator.datasetData(
             id: id
         )
 
         datasets[id] = downloaded
 
         print(
-            "🔭 [OpenStar] Dataset loaded: \(downloaded.times.count) samples"
+            "⭐️ [OpenStar] Dataset loaded: \(downloaded.count) bytes"
         )
 
         return downloaded

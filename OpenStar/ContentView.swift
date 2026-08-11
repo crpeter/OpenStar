@@ -15,8 +15,9 @@ struct ContentView: View {
                     header
                     contributionCard
                     projectCard
-                    discoveryCard
+                    lastResultCard
                     networkCard
+                    workloadCard
                     deviceCard
                     statisticsCard
                 }
@@ -36,7 +37,7 @@ struct ContentView: View {
                 .font(.title2.bold())
 
             Text(
-                "Help analyze real astronomical observations using this device."
+                "Run compatible distributed workloads using this device."
             )
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -100,14 +101,22 @@ struct ContentView: View {
 
     private var projectCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Science Project")
+            Text("Current Project")
                 .font(.headline)
 
             if let status = manager.projectStatus {
                 infoRow(
-                    "Target",
-                    status.targetName
+                    "Project",
+                    status.projectID
                 )
+
+                if let targetName = status.targetName,
+                   !targetName.isEmpty {
+                    infoRow(
+                        "Display Target",
+                        targetName
+                    )
+                }
 
                 infoRow(
                     "Workload",
@@ -149,9 +158,16 @@ struct ContentView: View {
                     "Retries",
                     "\(status.retryCount)"
                 )
+
+                if let failed = status.failedWorkUnits {
+                    infoRow(
+                        "Failed",
+                        "\(failed)"
+                    )
+                }
             } else {
                 Text(
-                    "Connect to the coordinator to load the current science project."
+                    "Connect to the coordinator to load the current project."
                 )
                 .foregroundStyle(.secondary)
             }
@@ -163,59 +179,24 @@ struct ContentView: View {
         )
     }
 
-    private var discoveryCard: some View {
+    private var lastResultCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Best Candidate")
+            Text("Last Workload Result")
                 .font(.headline)
 
-            if let period =
-                manager.bestCandidatePeriodDays {
-                HStack(
-                    alignment: .firstTextBaseline
-                ) {
-                    Text(
-                        period,
-                        format: .number.precision(
-                            .fractionLength(6)
-                        )
-                    )
-                    .font(
-                        .system(
-                            size: 34,
-                            weight: .bold,
-                            design: .rounded
-                        )
-                    )
-                    .monospacedDigit()
+            if let summary = manager.lastResultSummary {
+                Text(summary.title)
+                    .font(.subheadline.bold())
 
-                    Text("days")
-                        .foregroundStyle(.secondary)
-                }
-
-                if let frequency =
-                    manager.bestCandidateFrequency {
+                ForEach(summary.fields) { field in
                     infoRow(
-                        "Frequency",
-                        String(
-                            format: "%.6f cycles/day",
-                            frequency
-                        )
-                    )
-                }
-
-                if let power =
-                    manager.bestCandidatePower {
-                    infoRow(
-                        "Signal Power",
-                        String(
-                            format: "%.6f",
-                            power
-                        )
+                        field.label,
+                        field.value
                     )
                 }
             } else {
                 Text(
-                    "No candidate has been measured yet."
+                    "No completed workload result yet."
                 )
                 .foregroundStyle(.secondary)
             }
@@ -251,14 +232,61 @@ struct ContentView: View {
                 )
             }
 
-            if let workID =
-                manager.currentWorkUnitID {
+            if let workloadID = manager.currentWorkloadID {
+                infoRow(
+                    "Workload",
+                    workloadID
+                )
+            }
+
+            if let workID = manager.currentWorkUnitID {
                 infoRow(
                     "Work Unit",
                     String(
                         workID.uuidString.prefix(8)
                     )
                 )
+            }
+        }
+        .padding()
+        .background(.regularMaterial)
+        .clipShape(
+            RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private var workloadCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Supported Workloads")
+                .font(.headline)
+
+            if manager.supportedWorkloads.isEmpty {
+                Text("No workload plugins are available.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(
+                    manager.supportedWorkloads,
+                    id: \.workloadID
+                ) { capability in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(capability.workloadID)
+                            .font(.subheadline.bold())
+
+                        Text(
+                            capability.executionBackends
+                                .map(\.id)
+                                .joined(separator: ", ")
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                        if let validatorID = capability.validatorID {
+                            Text("Validator: \(validatorID)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
         .padding()
@@ -334,15 +362,14 @@ struct ContentView: View {
             )
 
             infoRow(
-                "GPU Compute Time",
+                "Compute Time",
                 String(
                     format: "%.3f sec",
                     manager.totalComputeSeconds
                 )
             )
 
-            if let duration =
-                manager.lastWorkUnitDuration {
+            if let duration = manager.lastWorkUnitDuration {
                 infoRow(
                     "Last Work Unit",
                     String(
