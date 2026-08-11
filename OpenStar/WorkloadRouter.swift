@@ -57,7 +57,7 @@ protocol OpenStarWorkloadHandler: Sendable {
 }
 
 nonisolated
-enum WorkloadRouterError: LocalizedError {
+enum WorkloadRouterError: LocalizedError, WorkFailureClassifyingError {
     case unsupportedWorkload(String)
 
     var errorDescription: String? {
@@ -65,6 +65,10 @@ enum WorkloadRouterError: LocalizedError {
         case .unsupportedWorkload(let workloadID):
             return "Unsupported workload: \(workloadID)"
         }
+    }
+
+    var workFailureKind: WorkFailureKind {
+        .unsupportedWorkload
     }
 }
 

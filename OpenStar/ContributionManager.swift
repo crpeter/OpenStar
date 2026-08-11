@@ -15,6 +15,7 @@ import Observation
 final class ContributionManager {
     private(set) var isContributing = false
     private(set) var isRegistered = false
+    private(set) var availability: WorkerAvailability = .available
 
     private(set) var unitsCompleted = 0
     private(set) var unitsAccepted = 0
@@ -63,6 +64,10 @@ final class ContributionManager {
         }
 
         if isContributing {
+            if availability == .temporarilyUnavailable {
+                return "Paused while device environment is unavailable"
+            }
+
             if let currentWorkloadID {
                 return "Computing \(currentWorkloadID)"
             }
@@ -105,6 +110,15 @@ final class ContributionManager {
                     }
 
                     capabilities = DeviceCapabilities.current()
+                    availability = WorkerEnvironment.currentAvailability()
+
+                    // Do not claim new work when this platform cannot currently
+                    // execute it. On iOS, inactive/background means Metal work
+                    // must wait until the app is active again.
+                    if availability != .available {
+                        try await Task.sleep(for: .milliseconds(250))
+                        continue
+                    }
 
                     guard let workUnit = try await coordinator.claimWork(
                         nodeID: nodeID
@@ -131,6 +145,12 @@ final class ContributionManager {
                     )
 
                     do {
+                        // Availability may change between claim and execution.
+                        // Returning environment-unavailable releases this lease
+                        // without penalizing the node.
+                        availability = WorkerEnvironment.currentAvailability()
+                        try WorkerEnvironment.requireAvailable()
+
                         let data: Data?
 
                         if let datasetID = workUnit.datasetID {
@@ -140,6 +160,10 @@ final class ContributionManager {
                         } else {
                             data = nil
                         }
+
+                        // Dataset download may race a foreground transition.
+                        availability = WorkerEnvironment.currentAvailability()
+                        try WorkerEnvironment.requireAvailable()
 
                         let execution = try await workloadRouter.execute(
                             workUnit: workUnit,
@@ -162,6 +186,7 @@ final class ContributionManager {
                             duration: execution.duration,
                             payload: execution.payload,
                             errorMessage: nil,
+                            failureKind: nil,
                             bestFrequency: legacy.bestFrequency,
                             bestPeriodDays: legacy.bestPeriodDays,
                             bestPower: legacy.bestPower
@@ -181,6 +206,9 @@ final class ContributionManager {
                     } catch is CancellationError {
                         break
                     } catch {
+                        let failureKind =
+                            classifyFailure(error)
+
                         let failedResult = WorkResult(
                             workUnitID: workUnit.id,
                             nodeID: nodeID,
@@ -188,6 +216,7 @@ final class ContributionManager {
                             duration: nil,
                             payload: nil,
                             errorMessage: error.localizedDescription,
+                            failureKind: failureKind,
                             bestFrequency: nil,
                             bestPeriodDays: nil,
                             bestPower: nil
@@ -198,12 +227,15 @@ final class ContributionManager {
                         )
 
                         print(
-                            "⭐️ [OpenStar] Work unit failed: \(error)"
+                            "⭐️ [OpenStar] Work unit failed "
+                            + "[\(failureKind.rawValue)]: "
+                            + error.localizedDescription
                         )
                     }
 
                     currentWorkUnitID = nil
                     currentWorkloadID = nil
+                    availability = WorkerEnvironment.currentAvailability()
 
                     try await refreshProjectStatus()
 
@@ -229,6 +261,40 @@ final class ContributionManager {
     func stop() {
         task?.cancel()
         isContributing = false
+    }
+
+    private func classifyFailure(
+        _ error: Error
+    ) -> WorkFailureKind {
+        if let classified =
+            error as? any WorkFailureClassifyingError {
+            return classified.workFailureKind
+        }
+
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut,
+                 .cannotFindHost,
+                 .cannotConnectToHost,
+                 .networkConnectionLost,
+                 .dnsLookupFailed,
+                 .notConnectedToInternet,
+                 .internationalRoamingOff,
+                 .dataNotAllowed:
+                return .transportUnavailable
+
+            default:
+                break
+            }
+        }
+
+        let nsError = error as NSError
+
+        if nsError.domain == NSURLErrorDomain {
+            return .transportUnavailable
+        }
+
+        return .unknown
     }
 
     private func registerNode() async throws {

@@ -34,6 +34,8 @@ final class CoordinatorClient: @unchecked Sendable {
         self.session = session
     }
 
+    // MARK: - Node Registration
+
     func register(
         nodeID: UUID,
         capabilities: NodeCapabilities
@@ -48,8 +50,14 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    func claimWork(nodeID: UUID) async throws -> WorkUnit? {
-        let url = makeURL(path: "v1/work/claim")
+    // MARK: - Work
+
+    func claimWork(
+        nodeID: UUID
+    ) async throws -> WorkUnit? {
+        let url = makeURL(
+            path: "v1/work/claim"
+        )
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -59,12 +67,19 @@ final class CoordinatorClient: @unchecked Sendable {
         )
 
         request.httpBody = try JSONEncoder().encode(
-            WorkClaimRequest(nodeID: nodeID)
+            WorkClaimRequest(
+                nodeID: nodeID
+            )
         )
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) =
+            try await session.data(
+                for: request
+            )
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse =
+            response as? HTTPURLResponse
+        else {
             throw CoordinatorClientError.invalidResponse
         }
 
@@ -72,10 +87,17 @@ final class CoordinatorClient: @unchecked Sendable {
             return nil
         }
 
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard
+            (200..<300).contains(
+                httpResponse.statusCode
+            )
+        else {
             throw CoordinatorClientError.serverError(
                 statusCode: httpResponse.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: String(
+                    decoding: data,
+                    as: UTF8.self
+                )
             )
         }
 
@@ -85,23 +107,58 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    func dataset(id: String) async throws -> AstronomyDataset {
+    // MARK: - Dataset
+
+    /// Generic OpenStar Core dataset access.
+    ///
+    /// Core treats dataset contents as opaque bytes.
+    /// The workload plugin is responsible for decoding
+    /// those bytes into its domain-specific model.
+    func datasetData(
+        id: String
+    ) async throws -> Data {
         let url = makeURL(
             path: "v1/datasets/\(id)"
         )
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) =
+            try await session.data(
+                from: url
+            )
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse =
+            response as? HTTPURLResponse
+        else {
             throw CoordinatorClientError.invalidResponse
         }
 
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard
+            (200..<300).contains(
+                httpResponse.statusCode
+            )
+        else {
             throw CoordinatorClientError.serverError(
                 statusCode: httpResponse.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: String(
+                    decoding: data,
+                    as: UTF8.self
+                )
             )
         }
+
+        return data
+    }
+
+    /// Compatibility API for the existing astronomy/TESS code.
+    ///
+    /// This intentionally sits on top of the generic raw-data API.
+    /// New OpenStar Core code should use datasetData(id:).
+    func dataset(
+        id: String
+    ) async throws -> AstronomyDataset {
+        let data = try await datasetData(
+            id: id
+        )
 
         return try JSONDecoder().decode(
             AstronomyDataset.self,
@@ -109,29 +166,50 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    func submit(result: WorkResult) async throws -> ResultReceipt {
+    // MARK: - Results
+
+    func submit(
+        result: WorkResult
+    ) async throws -> ResultReceipt {
         try await post(
-            path: "v1/work/\(result.workUnitID.uuidString)/result",
+            path:
+                "v1/work/"
+                + result.workUnitID.uuidString
+                + "/result",
             body: result,
             responseType: ResultReceipt.self
         )
     }
+
+    // MARK: - Project Status
 
     func projectStatus() async throws -> ProjectStatus {
         let url = makeURL(
             path: "v1/projects/current/status"
         )
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) =
+            try await session.data(
+                from: url
+            )
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse =
+            response as? HTTPURLResponse
+        else {
             throw CoordinatorClientError.invalidResponse
         }
 
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard
+            (200..<300).contains(
+                httpResponse.statusCode
+            )
+        else {
             throw CoordinatorClientError.serverError(
                 statusCode: httpResponse.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: String(
+                    decoding: data,
+                    as: UTF8.self
+                )
             )
         }
 
@@ -141,32 +219,59 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    private func post<Request: Encodable, Response: Decodable>(
+    // MARK: - HTTP
+
+    private func post<
+        Request: Encodable,
+        Response: Decodable
+    >(
         path: String,
         body: Request,
         responseType: Response.Type
     ) async throws -> Response {
-        let url = makeURL(path: path)
+        let url = makeURL(
+            path: path
+        )
 
-        var request = URLRequest(url: url)
+        var request =
+            URLRequest(
+                url: url
+            )
+
         request.httpMethod = "POST"
+
         request.setValue(
             "application/json",
             forHTTPHeaderField: "Content-Type"
         )
 
-        request.httpBody = try JSONEncoder().encode(body)
+        request.httpBody =
+            try JSONEncoder().encode(
+                body
+            )
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) =
+            try await session.data(
+                for: request
+            )
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        guard let httpResponse =
+            response as? HTTPURLResponse
+        else {
             throw CoordinatorClientError.invalidResponse
         }
 
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard
+            (200..<300).contains(
+                httpResponse.statusCode
+            )
+        else {
             throw CoordinatorClientError.serverError(
                 statusCode: httpResponse.statusCode,
-                message: String(decoding: data, as: UTF8.self)
+                message: String(
+                    decoding: data,
+                    as: UTF8.self
+                )
             )
         }
 
@@ -176,11 +281,15 @@ final class CoordinatorClient: @unchecked Sendable {
         )
     }
 
-    private func makeURL(path: String) -> URL {
+    private func makeURL(
+        path: String
+    ) -> URL {
         path
             .split(separator: "/")
             .reduce(baseURL) {
-                $0.appendingPathComponent(String($1))
+                $0.appendingPathComponent(
+                    String($1)
+                )
             }
     }
 }

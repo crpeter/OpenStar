@@ -187,6 +187,43 @@ struct WorkUnit: Codable, Identifiable, Sendable {
     let frequencyCount: Int?
 }
 
+
+nonisolated
+enum WorkFailureKind: String, Codable, Sendable {
+    /// The workload could not execute successfully on the node.
+    /// Examples: Metal command failure, buffer allocation failure, runtime fault.
+    case execution = "execution"
+
+    /// The workload executed, but its workload-owned integrity validator
+    /// rejected the output.
+    case workloadValidation = "workload-validation"
+
+    /// The claimed work or dataset could not be interpreted as valid input
+    /// for the workload.
+    case invalidInput = "invalid-input"
+
+    /// The worker's environment temporarily cannot execute this work.
+    /// Examples: iOS background GPU restrictions, temporary platform policy,
+    /// or another transient environment condition. This is not a broken node.
+    case environmentUnavailable = "environment-unavailable"
+
+    /// The worker temporarily cannot communicate with the coordinator.
+    /// Examples: connection lost, request timeout, offline network, DNS/host
+    /// reachability failure. This is not a workload or compute-node failure.
+    case transportUnavailable = "transport-unavailable"
+
+    /// The worker received a workload it does not implement.
+    case unsupportedWorkload = "unsupported-workload"
+
+    /// The worker could not classify the error more specifically.
+    case unknown = "unknown"
+}
+
+nonisolated
+protocol WorkFailureClassifyingError: Error {
+    var workFailureKind: WorkFailureKind { get }
+}
+
 nonisolated
 enum WorkResultStatus: String, Codable, Sendable {
     case completed
@@ -204,6 +241,9 @@ struct WorkResult: Codable, Sendable {
     let payload: JSONValue?
 
     let errorMessage: String?
+
+    // Generic failure provenance. Nil for completed work.
+    let failureKind: WorkFailureKind?
 
     // Transitional flattened TESS fields retained only so the existing v18
     // coordinator can continue its current period reduction while the server
