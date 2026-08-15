@@ -90,7 +90,7 @@ final class WorkloadRouter: @unchecked Sendable {
 
     let supportedCapabilities: [WorkloadCapability]
 
-    init() throws {
+    convenience init() throws {
         try self.init(handlers: [
             try LombScargleWorker()
         ])
