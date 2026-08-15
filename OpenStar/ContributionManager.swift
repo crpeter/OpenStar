@@ -59,8 +59,8 @@ final class ContributionManager {
             return errorMessage
         }
 
-        if projectStatus?.isComplete == true {
-            return "Project complete"
+        if isContributing, projectStatus?.isComplete == true {
+            return "Waiting for next project"
         }
 
         if isContributing {
@@ -106,7 +106,9 @@ final class ContributionManager {
 
                 while !Task.isCancelled {
                     if projectStatus?.isComplete == true {
-                        break
+                        try await Task.sleep(for: .seconds(1))
+                        try await refreshProjectStatus()
+                        continue
                     }
 
                     capabilities = DeviceCapabilities.current()
@@ -124,15 +126,9 @@ final class ContributionManager {
                         nodeID: nodeID
                     ) else {
                         try await refreshProjectStatus()
-
-                        if projectStatus?.isComplete == true {
-                            break
-                        }
-
                         try await Task.sleep(
                             for: .seconds(1)
                         )
-
                         continue
                     }
 
@@ -352,12 +348,23 @@ final class ContributionManager {
     }
 
     private func refreshProjectStatus() async throws {
-        projectStatus =
+        let refreshed =
             try await coordinator.projectStatus()
 
-        if let projectStatus {
-            currentProject =
-                projectStatus.projectID
+        let newProject = refreshed.projectID.isEmpty
+            ? nil
+            : refreshed.projectID
+
+        if newProject != currentProject {
+            // Dataset IDs are project-scoped. Never carry opaque dataset bytes
+            // into a newly activated workflow project even if an ID is reused.
+            datasets.removeAll(keepingCapacity: false)
+            currentWorkUnitID = nil
+            currentWorkloadID = nil
+            lastResultSummary = nil
         }
+
+        projectStatus = refreshed
+        currentProject = newProject
     }
 }
