@@ -1,5 +1,5 @@
 //
-//  TESSPeriodSearchCPUValidator.swift
+//  LombScargleCPUValidator.swift
 //  OpenStar
 //
 //  Workload-owned execution-integrity validator for
@@ -14,7 +14,7 @@
 import Foundation
 
 nonisolated
-struct TESSPeriodSearchValidation: Sendable {
+struct LombScargleValidation: Sendable {
     static let validatorID = "openstar.lomb-scargle.local-double.v1"
 
     let passed: Bool
@@ -31,9 +31,9 @@ struct TESSPeriodSearchValidation: Sendable {
 }
 
 nonisolated
-enum TESSPeriodSearchValidationError: LocalizedError {
+enum LombScargleValidationError: LocalizedError {
     case invalidInput(String)
-    case failed(TESSPeriodSearchValidation)
+    case failed(LombScargleValidation)
 
     var errorDescription: String? {
         switch self {
@@ -47,29 +47,29 @@ enum TESSPeriodSearchValidationError: LocalizedError {
 }
 
 nonisolated
-enum TESSPeriodSearchCPUValidator {
+enum LombScargleCPUValidator {
     private static let absolutePowerTolerance = 5.0e-5
     private static let relativePowerTolerance = 0.01
     private static let localMaximumRelativeTolerance = 0.01
 
     static func validate(
-        times: [Float],
-        flux: [Float],
+        coordinates: [Float],
+        values: [Float],
         metalBestIndex: Int,
         metalBestPower: Double,
         startFrequency: Float,
         frequencyStep: Float,
         frequencyCount: Int
-    ) throws -> TESSPeriodSearchValidation {
-        guard !times.isEmpty else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+    ) throws -> LombScargleValidation {
+        guard !coordinates.isEmpty else {
+            throw LombScargleValidationError.invalidInput(
                 "dataset is empty"
             )
         }
 
-        guard times.count == flux.count else {
-            throw TESSPeriodSearchValidationError.invalidInput(
-                "time/flux sample counts differ"
+        guard coordinates.count == values.count else {
+            throw LombScargleValidationError.invalidInput(
+                "coordinate/value sample counts differ"
             )
         }
 
@@ -78,20 +78,20 @@ enum TESSPeriodSearchCPUValidator {
               frequencyStep > 0,
               startFrequency.isFinite,
               startFrequency > 0 else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "frequency grid is invalid"
             )
         }
 
         guard metalBestIndex >= 0,
               metalBestIndex < frequencyCount else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "GPU winner index is outside the work unit"
             )
         }
 
         guard metalBestPower.isFinite else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "GPU winner power is not finite"
             )
         }
@@ -114,8 +114,8 @@ enum TESSPeriodSearchCPUValidator {
                 Double(index) * Double(frequencyStep)
 
             let power = try powerMatchingMetalFormula(
-                times: times,
-                flux: flux,
+                coordinates: coordinates,
+                values: values,
                 frequency: frequency
             )
 
@@ -130,7 +130,7 @@ enum TESSPeriodSearchCPUValidator {
         let winnerPower = localPowers.first(
             where: { $0.index == metalBestIndex }
         )?.power else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "CPU validator produced no finite local result"
             )
         }
@@ -183,7 +183,7 @@ enum TESSPeriodSearchCPUValidator {
             reason = "Local Float64 integrity check passed."
         }
 
-        return TESSPeriodSearchValidation(
+        return LombScargleValidation(
             passed: passed,
             reason: reason,
             metalBestIndex: metalBestIndex,
@@ -196,13 +196,13 @@ enum TESSPeriodSearchCPUValidator {
     }
 
     private static func powerMatchingMetalFormula(
-        times: [Float],
-        flux: [Float],
+        coordinates: [Float],
+        values: [Float],
         frequency: Double
     ) throws -> Double {
         guard frequency.isFinite,
               frequency > 0 else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "candidate frequency is invalid"
             )
         }
@@ -213,16 +213,16 @@ enum TESSPeriodSearchCPUValidator {
         var sumSin2 = 0.0
         var sumCos2 = 0.0
 
-        for timeFloat in times {
-            let time = Double(timeFloat)
+        for coordinateFloat in coordinates {
+            let coordinate = Double(coordinateFloat)
 
-            guard time.isFinite else {
-                throw TESSPeriodSearchValidationError.invalidInput(
-                    "time sample is not finite"
+            guard coordinate.isFinite else {
+                throw LombScargleValidationError.invalidInput(
+                    "coordinate sample is not finite"
                 )
             }
 
-            let angle = 2.0 * omega * time
+            let angle = 2.0 * omega * coordinate
             sumSin2 += sin(angle)
             sumCos2 += cos(angle)
         }
@@ -236,20 +236,20 @@ enum TESSPeriodSearchCPUValidator {
         var sumYSin = 0.0
         var sumCosSquared = 0.0
         var sumSinSquared = 0.0
-        var totalFluxSquared = 0.0
+        var totalValueSquared = 0.0
 
-        for index in times.indices {
-            let time = Double(times[index])
-            let value = Double(flux[index])
+        for index in coordinates.indices {
+            let coordinate = Double(coordinates[index])
+            let value = Double(values[index])
 
             guard value.isFinite else {
-                throw TESSPeriodSearchValidationError.invalidInput(
-                    "flux sample is not finite"
+                throw LombScargleValidationError.invalidInput(
+                    "value sample is not finite"
                 )
             }
 
-            let shiftedTime = time - tau
-            let angle = omega * shiftedTime
+            let shiftedCoordinate = coordinate - tau
+            let angle = omega * shiftedCoordinate
             let cosine = cos(angle)
             let sine = sin(angle)
 
@@ -258,13 +258,13 @@ enum TESSPeriodSearchCPUValidator {
 
             sumCosSquared += cosine * cosine
             sumSinSquared += sine * sine
-            totalFluxSquared += value * value
+            totalValueSquared += value * value
         }
 
         guard sumCosSquared > 0,
               sumSinSquared > 0,
-              totalFluxSquared > 0 else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+              totalValueSquared > 0 else {
+            throw LombScargleValidationError.invalidInput(
                 "degenerate Lomb-Scargle normalization"
             )
         }
@@ -279,10 +279,10 @@ enum TESSPeriodSearchCPUValidator {
 
         let power =
             (cosinePower + sinePower) /
-            totalFluxSquared
+            totalValueSquared
 
         guard power.isFinite else {
-            throw TESSPeriodSearchValidationError.invalidInput(
+            throw LombScargleValidationError.invalidInput(
                 "CPU validator power is not finite"
             )
         }

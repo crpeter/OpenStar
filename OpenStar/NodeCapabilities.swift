@@ -102,7 +102,7 @@ enum JSONValue: Codable, Sendable, Equatable {
               doubleValue.rounded() == doubleValue else {
             return nil
         }
-        return Int(doubleValue)
+        return Int(exactly: doubleValue)
     }
 
     var boolValue: Bool? {

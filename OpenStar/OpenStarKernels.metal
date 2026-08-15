@@ -7,8 +7,8 @@
 using namespace metal;
 
 kernel void openStarLombScargle(
-    device const float *times [[buffer(0)]],
-    device const float *flux [[buffer(1)]],
+    device const float *coordinates [[buffer(0)]],
+    device const float *values [[buffer(1)]],
     device float *powers [[buffer(2)]],
     constant uint &sampleCount [[buffer(3)]],
     constant float &startFrequency [[buffer(4)]],
@@ -27,7 +27,7 @@ kernel void openStarLombScargle(
     float sumCos2 = 0.0f;
 
     for (uint sample = 0; sample < sampleCount; ++sample) {
-        float angle = 2.0f * omega * times[sample];
+        float angle = 2.0f * omega * coordinates[sample];
 
         sumSin2 += sin(angle);
         sumCos2 += cos(angle);
@@ -47,18 +47,18 @@ kernel void openStarLombScargle(
     float sumCosSquared = 0.0f;
     float sumSinSquared = 0.0f;
 
-    float totalFluxSquared = 0.0f;
+    float totalValueSquared = 0.0f;
 
     for (uint sample = 0; sample < sampleCount; ++sample) {
         float shiftedTime =
-            times[sample] - tau;
+            coordinates[sample] - tau;
 
         float angle =
             omega * shiftedTime;
 
         float cosine = cos(angle);
         float sine = sin(angle);
-        float value = flux[sample];
+        float value = values[sample];
 
         sumYCos += value * cosine;
         sumYSin += value * sine;
@@ -66,13 +66,13 @@ kernel void openStarLombScargle(
         sumCosSquared += cosine * cosine;
         sumSinSquared += sine * sine;
 
-        totalFluxSquared += value * value;
+        totalValueSquared += value * value;
     }
 
     if (
         sumCosSquared <= 0.0f ||
         sumSinSquared <= 0.0f ||
-        totalFluxSquared <= 0.0f
+        totalValueSquared <= 0.0f
     ) {
         powers[id] = 0.0f;
         return;
@@ -88,5 +88,5 @@ kernel void openStarLombScargle(
 
     powers[id] =
         (cosinePower + sinePower) /
-        totalFluxSquared;
+        totalValueSquared;
 }
