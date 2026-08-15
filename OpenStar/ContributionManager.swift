@@ -140,6 +140,8 @@ final class ContributionManager {
                         "⭐️ [OpenStar] Claimed \(workUnit.id) · \(workUnit.workloadID)"
                     )
 
+                    let result: WorkResult
+
                     do {
                         // Availability may change between claim and execution.
                         // Returning environment-unavailable releases this lease
@@ -175,7 +177,7 @@ final class ContributionManager {
 
                         let legacy = execution.legacyResultFields
 
-                        let networkResult = WorkResult(
+                        result = WorkResult(
                             workUnitID: workUnit.id,
                             nodeID: nodeID,
                             status: .completed,
@@ -188,24 +190,13 @@ final class ContributionManager {
                             bestPower: legacy.bestPower
                         )
 
-                        let receipt = try await coordinator.submit(
-                            result: networkResult
-                        )
-
-                        if receipt.accepted {
-                            unitsAccepted += 1
-                        }
-
-                        print(
-                            "⭐️ [OpenStar] Server response: \(receipt.message)"
-                        )
                     } catch is CancellationError {
                         break
                     } catch {
                         let failureKind =
                             classifyFailure(error)
 
-                        let failedResult = WorkResult(
+                        result = WorkResult(
                             workUnitID: workUnit.id,
                             nodeID: nodeID,
                             status: .failed,
@@ -218,16 +209,28 @@ final class ContributionManager {
                             bestPower: nil
                         )
 
-                        _ = try? await coordinator.submit(
-                            result: failedResult
-                        )
-
                         print(
                             "⭐️ [OpenStar] Work unit failed "
                             + "[\(failureKind.rawValue)]: "
                             + error.localizedDescription
                         )
                     }
+
+                    // A computed result must not be replaced by a failed result
+                    // merely because its first submission hit a transient
+                    // network error. Retry the exact same work-unit
+                    // result before this worker claims anything else.
+                    let receipt = try await submitWithRetry(
+                        result: result
+                    )
+
+                    if receipt.accepted {
+                        unitsAccepted += 1
+                    }
+
+                    print(
+                        "⭐️ [OpenStar] Server response: \(receipt.message)"
+                    )
 
                     currentWorkUnitID = nil
                     currentWorkloadID = nil
@@ -291,6 +294,56 @@ final class ContributionManager {
         }
 
         return .unknown
+    }
+
+    private func submitWithRetry(
+        result: WorkResult,
+        maximumAttempts: Int = 3
+    ) async throws -> ResultReceipt {
+        precondition(maximumAttempts > 0)
+
+        var attempt = 1
+
+        while true {
+            do {
+                return try await coordinator.submit(
+                    result: result
+                )
+            } catch {
+                guard attempt < maximumAttempts,
+                      isRetryableCoordinatorError(error) else {
+                    throw error
+                }
+
+                let delay = 250 * (1 << (attempt - 1))
+
+                print(
+                    "⭐️ [OpenStar] Result submission attempt \(attempt) failed; retrying"
+                )
+
+                try await Task.sleep(
+                    for: .milliseconds(delay)
+                )
+                attempt += 1
+            }
+        }
+    }
+
+    private func isRetryableCoordinatorError(
+        _ error: Error
+    ) -> Bool {
+        if classifyFailure(error) == .transportUnavailable {
+            return true
+        }
+
+        guard let coordinatorError = error as? CoordinatorClientError,
+              case .serverError(let statusCode, _) = coordinatorError else {
+            return false
+        }
+
+        return statusCode == 408 ||
+            statusCode == 429 ||
+            (500..<600).contains(statusCode)
     }
 
     private func registerNode() async throws {

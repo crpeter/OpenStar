@@ -59,16 +59,28 @@ protocol OpenStarWorkloadHandler: Sendable {
 nonisolated
 enum WorkloadRouterError: LocalizedError, WorkFailureClassifyingError {
     case unsupportedWorkload(String)
+    case duplicateWorkload(String)
+    case invalidCapabilities(String)
 
     var errorDescription: String? {
         switch self {
         case .unsupportedWorkload(let workloadID):
             return "Unsupported workload: \(workloadID)"
+        case .duplicateWorkload(let workloadID):
+            return "Multiple workload handlers registered for: \(workloadID)"
+        case .invalidCapabilities(let message):
+            return "Invalid workload capabilities: \(message)"
         }
     }
 
     var workFailureKind: WorkFailureKind {
-        .unsupportedWorkload
+        switch self {
+        case .unsupportedWorkload:
+            return .unsupportedWorkload
+        case .duplicateWorkload,
+             .invalidCapabilities:
+            return .execution
+        }
     }
 }
 
@@ -79,15 +91,29 @@ final class WorkloadRouter: @unchecked Sendable {
     let supportedCapabilities: [WorkloadCapability]
 
     init() throws {
-        let handlers: [any OpenStarWorkloadHandler] = [
-            try TESSPeriodSearchWorker()
-        ]
+        try self.init(handlers: [
+            try LombScargleWorker()
+        ])
+    }
 
+    init(handlers: [any OpenStarWorkloadHandler]) throws {
         var routed: [String: any OpenStarWorkloadHandler] = [:]
         var capabilities: [WorkloadCapability] = []
 
         for handler in handlers {
+            let routedIDs = Set(handler.workloadIDs)
+            let capabilityIDs = Set(handler.capabilities.map(\.workloadID))
+
+            guard routedIDs == capabilityIDs else {
+                throw WorkloadRouterError.invalidCapabilities(
+                    "routed and advertised workload IDs differ"
+                )
+            }
+
             for workloadID in handler.workloadIDs {
+                guard routed[workloadID] == nil else {
+                    throw WorkloadRouterError.duplicateWorkload(workloadID)
+                }
                 routed[workloadID] = handler
             }
 

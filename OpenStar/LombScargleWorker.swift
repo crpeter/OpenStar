@@ -1,5 +1,5 @@
 //
-//  TESSPeriodSearchWorker.swift
+//  LombScargleWorker.swift
 //  OpenStar
 //
 //  Domain/workload plugin for Lomb-Scargle period-search work.
@@ -10,14 +10,50 @@ import Foundation
 import Metal
 
 nonisolated
-struct TESSPeriodSearchDataset: Codable, Sendable {
-    let id: String
-    let targetName: String?
-    let mission: String?
-    let timeUnit: String?
-    let fluxUnit: String?
-    let times: [Float]
-    let flux: [Float]
+struct LombScargleDataset: Codable, Sendable {
+    let id: String?
+    let coordinates: [Float]
+    let values: [Float]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, coordinates, values, times, flux
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+        coordinates = try Self.decodeArray(
+            from: container,
+            genericKey: .coordinates,
+            legacyKey: .times
+        )
+        values = try Self.decodeArray(
+            from: container,
+            genericKey: .values,
+            legacyKey: .flux
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        try container.encodeIfPresent(id, forKey: .id)
+        try container.encode(coordinates, forKey: .coordinates)
+        try container.encode(values, forKey: .values)
+    }
+
+    private static func decodeArray(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        genericKey: CodingKeys,
+        legacyKey: CodingKeys
+    ) throws -> [Float] {
+        if container.contains(genericKey) {
+            return try container.decode([Float].self, forKey: genericKey)
+        }
+
+        return try container.decode([Float].self, forKey: legacyKey)
+    }
 }
 
 nonisolated
@@ -29,7 +65,7 @@ struct LombScargleWorkPayload: Sendable {
 }
 
 nonisolated
-enum PeriodSearchError: LocalizedError {
+enum LombScargleError: LocalizedError {
     case metalUnavailable
     case commandQueueUnavailable
     case libraryUnavailable
@@ -43,7 +79,7 @@ enum PeriodSearchError: LocalizedError {
     case encoderUnavailable
     case commandFailed(Error?)
     case noFiniteResult
-    case validationFailed(TESSPeriodSearchValidation)
+    case validationFailed(LombScargleValidation)
 
     var errorDescription: String? {
         switch self {
@@ -93,27 +129,27 @@ enum PeriodSearchError: LocalizedError {
 }
 
 nonisolated
-final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable {
+final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
     // New domain-neutral workload name plus the existing project ID as a
     // compatibility alias. Both route to the same implementation.
     static let workloadID = "openstar.lomb-scargle.v1"
     static let legacyWorkloadID = "openstar.tess-period-search.v1"
 
     let workloadIDs = [
-        TESSPeriodSearchWorker.workloadID,
-        TESSPeriodSearchWorker.legacyWorkloadID
+        LombScargleWorker.workloadID,
+        LombScargleWorker.legacyWorkloadID
     ]
 
     let capabilities = [
         WorkloadCapability(
-            workloadID: TESSPeriodSearchWorker.workloadID,
+            workloadID: LombScargleWorker.workloadID,
             executionBackends: [.metal],
-            validatorID: TESSPeriodSearchValidation.validatorID
+            validatorID: LombScargleValidation.validatorID
         ),
         WorkloadCapability(
-            workloadID: TESSPeriodSearchWorker.legacyWorkloadID,
+            workloadID: LombScargleWorker.legacyWorkloadID,
             executionBackends: [.metal],
-            validatorID: TESSPeriodSearchValidation.validatorID
+            validatorID: LombScargleValidation.validatorID
         )
     ]
 
@@ -123,21 +159,21 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
-            throw PeriodSearchError.metalUnavailable
+            throw LombScargleError.metalUnavailable
         }
 
         guard let commandQueue = device.makeCommandQueue() else {
-            throw PeriodSearchError.commandQueueUnavailable
+            throw LombScargleError.commandQueueUnavailable
         }
 
         guard let library = device.makeDefaultLibrary() else {
-            throw PeriodSearchError.libraryUnavailable
+            throw LombScargleError.libraryUnavailable
         }
 
         guard let function = library.makeFunction(
             name: "openStarLombScargle"
         ) else {
-            throw PeriodSearchError.functionUnavailable
+            throw LombScargleError.functionUnavailable
         }
 
         do {
@@ -145,7 +181,7 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
                 function: function
             )
         } catch {
-            throw PeriodSearchError.pipelineCreationFailed(error)
+            throw LombScargleError.pipelineCreationFailed(error)
         }
 
         self.device = device
@@ -160,15 +196,15 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
         try Task.checkCancellation()
 
         guard let datasetData else {
-            throw PeriodSearchError.missingDataset
+            throw LombScargleError.missingDataset
         }
 
         let dataset = try JSONDecoder().decode(
-            TESSPeriodSearchDataset.self,
+            LombScargleDataset.self,
             from: datasetData
         )
 
-        let payload = try workPayload(
+        let payload = try Self.workPayload(
             from: workUnit
         )
 
@@ -183,9 +219,9 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
 
         let validationStarted = ProcessInfo.processInfo.systemUptime
 
-        let validation = try TESSPeriodSearchCPUValidator.validate(
-            times: dataset.times,
-            flux: dataset.flux,
+        let validation = try LombScargleCPUValidator.validate(
+            coordinates: dataset.coordinates,
+            values: dataset.values,
             metalBestIndex: metalResult.bestIndex,
             metalBestPower: metalResult.bestPower,
             startFrequency: payload.startFrequency,
@@ -197,7 +233,7 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
             ProcessInfo.processInfo.systemUptime - validationStarted
 
         guard validation.passed else {
-            throw PeriodSearchError.validationFailed(
+            throw LombScargleError.validationFailed(
                 validation
             )
         }
@@ -207,13 +243,17 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
 
         let resultPayload: JSONValue = .object([
             "bestFrequency": .number(metalResult.bestFrequency),
-            "bestPeriodDays": .number(metalResult.bestPeriodDays),
+            // Retained for the existing astronomy-oriented wire contract.
+            // Generic presentation treats this as reciprocal frequency.
+            "bestPeriodDays": .number(metalResult.reciprocalFrequency),
             "bestPower": .number(metalResult.bestPower),
-            "bestFrequencyIndex": .number(Double(metalResult.bestIndex)),
+            "bestFrequencyIndex": .number(
+                Double(payload.frequencyStartIndex + metalResult.bestIndex)
+            ),
             "metalDurationSeconds": .number(metalResult.metalDuration),
             "validation": .object([
                 "validatorID": .string(
-                    TESSPeriodSearchValidation.validatorID
+                    LombScargleValidation.validatorID
                 ),
                 "passed": .bool(true),
                 "cpuBestLocalIndex": .number(
@@ -239,18 +279,18 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
                 title: "Lomb-Scargle Result",
                 fields: [
                     WorkloadResultField(
-                        id: "period",
-                        label: "Period",
+                        id: "reciprocal-frequency",
+                        label: "Reciprocal Frequency",
                         value: String(
-                            format: "%.6f days",
-                            metalResult.bestPeriodDays
+                            format: "%.6f",
+                            metalResult.reciprocalFrequency
                         )
                     ),
                     WorkloadResultField(
                         id: "frequency",
                         label: "Frequency",
                         value: String(
-                            format: "%.6f cycles/day",
+                            format: "%.6f",
                             metalResult.bestFrequency
                         )
                     ),
@@ -271,20 +311,26 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
             ),
             legacyResultFields: LegacyResultFields(
                 bestFrequency: metalResult.bestFrequency,
-                bestPeriodDays: metalResult.bestPeriodDays,
+                bestPeriodDays: metalResult.reciprocalFrequency,
                 bestPower: metalResult.bestPower
             )
         )
     }
 
-    private func workPayload(
+    static func workPayload(
         from workUnit: WorkUnit
     ) throws -> LombScargleWorkPayload {
-        if let payloadObject = workUnit.payload?.objectValue {
+        if let payload = workUnit.payload {
+            guard let payloadObject = payload.objectValue else {
+                throw LombScargleError.invalidWorkUnit(
+                    "generic payload must be a JSON object"
+                )
+            }
+
             guard let startFrequency = payloadObject["startFrequency"]?.doubleValue,
                   let frequencyStep = payloadObject["frequencyStep"]?.doubleValue,
                   let frequencyCount = payloadObject["frequencyCount"]?.intValue else {
-                throw PeriodSearchError.invalidWorkUnit(
+                throw LombScargleError.invalidWorkUnit(
                     "generic payload is missing startFrequency, frequencyStep, or frequencyCount"
                 )
             }
@@ -305,7 +351,7 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
         guard let startFrequency = workUnit.startFrequency,
               let frequencyStep = workUnit.frequencyStep,
               let frequencyCount = workUnit.frequencyCount else {
-            throw PeriodSearchError.invalidWorkUnit(
+            throw LombScargleError.invalidWorkUnit(
                 "no generic payload or legacy frequency fields were supplied"
             )
         }
@@ -318,30 +364,35 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
         )
     }
 
-    private func validatedPayload(
+    private static func validatedPayload(
         frequencyStartIndex: Int,
         startFrequency: Double,
         frequencyStep: Double,
         frequencyCount: Int
     ) throws -> LombScargleWorkPayload {
-        guard startFrequency.isFinite,
+        guard frequencyStartIndex >= 0,
+              startFrequency.isFinite,
               frequencyStep.isFinite,
               startFrequency > 0,
               frequencyStep > 0,
               frequencyCount > 0 else {
-            throw PeriodSearchError.invalidWorkUnit(
+            throw LombScargleError.invalidWorkUnit(
                 "frequency grid is invalid"
             )
         }
 
         let startFrequencyFloat = Float(startFrequency)
         let frequencyStepFloat = Float(frequencyStep)
+        let lastFrequency = startFrequency +
+            Double(frequencyCount - 1) * frequencyStep
 
         guard startFrequencyFloat.isFinite,
               frequencyStepFloat.isFinite,
+              lastFrequency.isFinite,
+              Float(lastFrequency).isFinite,
               startFrequencyFloat > 0,
               frequencyStepFloat > 0 else {
-            throw PeriodSearchError.invalidWorkUnit(
+            throw LombScargleError.invalidWorkUnit(
                 "frequency grid cannot be represented by the Metal Float32 workload"
             )
         }
@@ -354,61 +405,70 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
         )
     }
 
-    private struct MetalResult {
+    private struct NumericalResult {
         let metalDuration: Double
         let bestIndex: Int
         let bestFrequency: Double
-        let bestPeriodDays: Double
+        let reciprocalFrequency: Double
         let bestPower: Double
     }
 
     private func runMetalSynchronously(
         payload: LombScargleWorkPayload,
-        dataset: TESSPeriodSearchDataset
-    ) throws -> MetalResult {
-        guard !dataset.times.isEmpty,
-              dataset.times.count == dataset.flux.count,
-              dataset.times.allSatisfy(\.isFinite),
-              dataset.flux.allSatisfy(\.isFinite) else {
-            throw PeriodSearchError.invalidDataset
+        dataset: LombScargleDataset
+    ) throws -> NumericalResult {
+        guard !dataset.coordinates.isEmpty,
+              dataset.coordinates.count == dataset.values.count,
+              dataset.coordinates.allSatisfy(\.isFinite),
+              dataset.values.allSatisfy(\.isFinite) else {
+            throw LombScargleError.invalidDataset
         }
 
-        let sampleCount = dataset.times.count
+        let sampleCount = dataset.coordinates.count
 
-        let timeByteCount =
+        guard sampleCount <= Int(UInt32.max),
+              payload.frequencyStartIndex <= Int.max - payload.frequencyCount,
+              payload.frequencyCount <= Int.max / MemoryLayout<Float>.stride,
+              sampleCount <= Int.max / MemoryLayout<Float>.stride else {
+            throw LombScargleError.invalidWorkUnit(
+                "input dimensions exceed the Metal workload limits"
+            )
+        }
+
+        let sampleByteCount =
             sampleCount * MemoryLayout<Float>.stride
 
         let outputByteCount =
             payload.frequencyCount * MemoryLayout<Float>.stride
 
-        guard let timeBuffer = device.makeBuffer(
-            bytes: dataset.times,
-            length: timeByteCount,
+        guard let coordinateBuffer = device.makeBuffer(
+            bytes: dataset.coordinates,
+            length: sampleByteCount,
             options: .storageModeShared
         ),
-        let fluxBuffer = device.makeBuffer(
-            bytes: dataset.flux,
-            length: timeByteCount,
+        let valueBuffer = device.makeBuffer(
+            bytes: dataset.values,
+            length: sampleByteCount,
             options: .storageModeShared
         ),
         let powerBuffer = device.makeBuffer(
             length: outputByteCount,
             options: .storageModeShared
         ) else {
-            throw PeriodSearchError.bufferAllocationFailed
+            throw LombScargleError.bufferAllocationFailed
         }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw PeriodSearchError.commandBufferUnavailable
+            throw LombScargleError.commandBufferUnavailable
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw PeriodSearchError.encoderUnavailable
+            throw LombScargleError.encoderUnavailable
         }
 
         encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(timeBuffer, offset: 0, index: 0)
-        encoder.setBuffer(fluxBuffer, offset: 0, index: 1)
+        encoder.setBuffer(coordinateBuffer, offset: 0, index: 0)
+        encoder.setBuffer(valueBuffer, offset: 0, index: 1)
         encoder.setBuffer(powerBuffer, offset: 0, index: 2)
 
         var gpuSampleCount = UInt32(sampleCount)
@@ -464,7 +524,7 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
             ProcessInfo.processInfo.systemUptime - started
 
         guard commandBuffer.status == .completed else {
-            throw PeriodSearchError.commandFailed(
+            throw LombScargleError.commandFailed(
                 commandBuffer.error
             )
         }
@@ -488,7 +548,7 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
 
         guard let bestIndex,
               bestPower.isFinite else {
-            throw PeriodSearchError.noFiniteResult
+            throw LombScargleError.noFiniteResult
         }
 
         let bestFrequency =
@@ -498,14 +558,14 @@ final class TESSPeriodSearchWorker: OpenStarWorkloadHandler, @unchecked Sendable
 
         guard bestFrequency.isFinite,
               bestFrequency > 0 else {
-            throw PeriodSearchError.noFiniteResult
+            throw LombScargleError.noFiniteResult
         }
 
-        return MetalResult(
+        return NumericalResult(
             metalDuration: metalDuration,
             bestIndex: bestIndex,
             bestFrequency: bestFrequency,
-            bestPeriodDays: 1.0 / bestFrequency,
+            reciprocalFrequency: 1.0 / bestFrequency,
             bestPower: Double(bestPower)
         )
     }

@@ -1,8 +1,8 @@
 //
-//  TESSPeriodSearchFailureClassification.swift
+//  LombScargleFailureClassification.swift
 //  OpenStar
 //
-//  Workload-specific mapping from Lomb-Scargle/TESS errors into the generic
+//  Workload-specific mapping from Lomb-Scargle errors into the generic
 //  OpenStar WorkFailureKind taxonomy.
 //
 //  OpenStar Core only understands WorkFailureKind. It does not need to know
@@ -11,7 +11,7 @@
 
 import Foundation
 
-extension PeriodSearchError: WorkFailureClassifyingError {
+extension LombScargleError: WorkFailureClassifyingError {
     nonisolated
     var workFailureKind: WorkFailureKind {
         switch self {
@@ -60,7 +60,7 @@ extension PeriodSearchError: WorkFailureClassifyingError {
     }
 }
 
-extension TESSPeriodSearchValidationError: WorkFailureClassifyingError {
+extension LombScargleValidationError: WorkFailureClassifyingError {
     nonisolated
     var workFailureKind: WorkFailureKind {
         switch self {
