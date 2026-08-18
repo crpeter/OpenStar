@@ -149,6 +149,20 @@ final class CoordinatorClient: @unchecked Sendable {
         return data
     }
 
+    /// Fetches the opaque dataset belonging to one exact project.
+    func datasetData(
+        projectID: String,
+        datasetID: String
+    ) async throws -> Data {
+        let url = makeURL(
+            pathComponents: [
+                "v1", "projects", projectID, "datasets", datasetID
+            ]
+        )
+
+        return try await data(from: url)
+    }
+
     /// Compatibility API for the existing astronomy/TESS code.
     ///
     /// This intentionally sits on top of the generic raw-data API.
@@ -183,10 +197,30 @@ final class CoordinatorClient: @unchecked Sendable {
 
     // MARK: - Project Status
 
-    func projectStatus() async throws -> ProjectStatus {
-        let url = makeURL(
-            path: "v1/projects/current/status"
+    func projectStatus(
+        projectID: String? = nil
+    ) async throws -> ProjectStatus {
+        let url: URL
+
+        if let projectID {
+            url = makeURL(
+                pathComponents: ["v1", "projects", projectID, "status"]
+            )
+        } else {
+            url = makeURL(
+                path: "v1/projects/current/status"
+            )
+        }
+
+        let data = try await data(from: url)
+
+        return try JSONDecoder().decode(
+            ProjectStatus.self,
+            from: data
         )
+    }
+
+    private func data(from url: URL) async throws -> Data {
 
         let (data, response) =
             try await session.data(
@@ -213,10 +247,7 @@ final class CoordinatorClient: @unchecked Sendable {
             )
         }
 
-        return try JSONDecoder().decode(
-            ProjectStatus.self,
-            from: data
-        )
+        return data
     }
 
     // MARK: - HTTP
@@ -291,5 +322,25 @@ final class CoordinatorClient: @unchecked Sendable {
                     String($1)
                 )
             }
+    }
+
+    private func makeURL(
+        pathComponents: [String]
+    ) -> URL {
+        var components = URLComponents(
+            url: baseURL,
+            resolvingAgainstBaseURL: false
+        )!
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+
+        for pathComponent in pathComponents {
+            let encoded = pathComponent.addingPercentEncoding(
+                withAllowedCharacters: allowed
+            )!
+            components.percentEncodedPath += "/" + encoded
+        }
+
+        return components.url!
     }
 }

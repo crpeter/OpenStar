@@ -88,9 +88,6 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(
-                manager.projectStatus?.isComplete == true
-            )
         }
         .padding()
         .background(.regularMaterial)

@@ -13,6 +13,11 @@ import Observation
 @MainActor
 @Observable
 final class ContributionManager {
+    private struct DatasetCacheKey: Hashable {
+        let projectID: String
+        let datasetID: String
+    }
+
     private(set) var isContributing = false
     private(set) var isRegistered = false
     private(set) var availability: WorkerAvailability = .available
@@ -39,7 +44,7 @@ final class ContributionManager {
     private let coordinator: CoordinatorClient
     private let workloadRouter: WorkloadRouter?
 
-    private var datasets: [String: Data] = [:]
+    private var datasets: [DatasetCacheKey: Data] = [:]
     private var task: Task<Void, Never>?
 
     init() {
@@ -54,13 +59,19 @@ final class ContributionManager {
         }
     }
 
+    init(
+        nodeID: UUID = UUID(),
+        coordinator: CoordinatorClient,
+        workloadRouter: WorkloadRouter
+    ) {
+        self.nodeID = nodeID
+        self.coordinator = coordinator
+        self.workloadRouter = workloadRouter
+    }
+
     var statusText: String {
         if let errorMessage {
             return errorMessage
-        }
-
-        if isContributing, projectStatus?.isComplete == true {
-            return "Waiting for next project"
         }
 
         if isContributing {
@@ -102,15 +113,9 @@ final class ContributionManager {
 
             do {
                 try await registerNode()
-                try await refreshProjectStatus()
+                await refreshProjectStatus()
 
                 while !Task.isCancelled {
-                    if projectStatus?.isComplete == true {
-                        try await Task.sleep(for: .seconds(1))
-                        try await refreshProjectStatus()
-                        continue
-                    }
-
                     capabilities = DeviceCapabilities.current()
                     availability = WorkerEnvironment.currentAvailability()
 
@@ -125,7 +130,7 @@ final class ContributionManager {
                     guard let workUnit = try await coordinator.claimWork(
                         nodeID: nodeID
                     ) else {
-                        try await refreshProjectStatus()
+                        await refreshProjectStatus()
                         try await Task.sleep(
                             for: .seconds(1)
                         )
@@ -153,7 +158,8 @@ final class ContributionManager {
 
                         if let datasetID = workUnit.datasetID {
                             data = try await datasetData(
-                                id: datasetID
+                                projectID: workUnit.projectID,
+                                datasetID: datasetID
                             )
                         } else {
                             data = nil
@@ -236,7 +242,7 @@ final class ContributionManager {
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
 
-                    try await refreshProjectStatus()
+                    await refreshProjectStatus()
 
                     await Task.yield()
                 }
@@ -376,22 +382,29 @@ final class ContributionManager {
         }
     }
 
-    private func datasetData(
-        id: String
+    func datasetData(
+        projectID: String,
+        datasetID: String
     ) async throws -> Data {
-        if let cached = datasets[id] {
+        let key = DatasetCacheKey(
+            projectID: projectID,
+            datasetID: datasetID
+        )
+
+        if let cached = datasets[key] {
             return cached
         }
 
         print(
-            "⭐️ [OpenStar] Downloading dataset \(id)"
+            "⭐️ [OpenStar] Downloading dataset \(projectID)/\(datasetID)"
         )
 
         let downloaded = try await coordinator.datasetData(
-            id: id
+            projectID: projectID,
+            datasetID: datasetID
         )
 
-        datasets[id] = downloaded
+        datasets[key] = downloaded
 
         print(
             "⭐️ [OpenStar] Dataset loaded: \(downloaded.count) bytes"
@@ -400,24 +413,21 @@ final class ContributionManager {
         return downloaded
     }
 
-    private func refreshProjectStatus() async throws {
-        let refreshed =
-            try await coordinator.projectStatus()
+    private func refreshProjectStatus() async {
+        do {
+            let refreshed = try await coordinator.projectStatus(
+                projectID: currentProject
+            )
 
-        let newProject = refreshed.projectID.isEmpty
-            ? nil
-            : refreshed.projectID
-
-        if newProject != currentProject {
-            // Dataset IDs are project-scoped. Never carry opaque dataset bytes
-            // into a newly activated workflow project even if an ID is reused.
-            datasets.removeAll(keepingCapacity: false)
-            currentWorkUnitID = nil
-            currentWorkloadID = nil
-            lastResultSummary = nil
+            projectStatus = refreshed
+        } catch {
+            // Project status is display-only. A removed project or temporary
+            // status-service failure must not stop this generic worker from
+            // claiming work from the shared compute pool.
+            print(
+                "⭐️ [OpenStar] Project status unavailable: "
+                + error.localizedDescription
+            )
         }
-
-        projectStatus = refreshed
-        currentProject = newProject
     }
 }
