@@ -113,7 +113,7 @@ final class ContributionManager {
 
             do {
                 try await registerNode()
-                try await refreshProjectStatus()
+                await refreshProjectStatus()
 
                 while !Task.isCancelled {
                     capabilities = DeviceCapabilities.current()
@@ -130,7 +130,7 @@ final class ContributionManager {
                     guard let workUnit = try await coordinator.claimWork(
                         nodeID: nodeID
                     ) else {
-                        try await refreshProjectStatus()
+                        await refreshProjectStatus()
                         try await Task.sleep(
                             for: .seconds(1)
                         )
@@ -242,7 +242,7 @@ final class ContributionManager {
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
 
-                    try await refreshProjectStatus()
+                    await refreshProjectStatus()
 
                     await Task.yield()
                 }
@@ -413,12 +413,21 @@ final class ContributionManager {
         return downloaded
     }
 
-    private func refreshProjectStatus() async throws {
-        let refreshed =
-            try await coordinator.projectStatus(
+    private func refreshProjectStatus() async {
+        do {
+            let refreshed = try await coordinator.projectStatus(
                 projectID: currentProject
             )
 
-        projectStatus = refreshed
+            projectStatus = refreshed
+        } catch {
+            // Project status is display-only. A removed project or temporary
+            // status-service failure must not stop this generic worker from
+            // claiming work from the shared compute pool.
+            print(
+                "⭐️ [OpenStar] Project status unavailable: "
+                + error.localizedDescription
+            )
+        }
     }
 }

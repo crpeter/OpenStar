@@ -247,6 +247,65 @@ struct OpenStarTests {
         #expect(recorder.paths.contains("/v1/work/claim"))
     }
 
+    @MainActor
+    @Test func failedProjectStatusDoesNotPreventNextClaim() async throws {
+        let workID = UUID()
+        let workData = Data(
+            """
+            {"id":"\(workID.uuidString)","projectID":"removed-project","workloadID":"unsupported"}
+            """.utf8
+        )
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (
+                    Data(#"{"accepted":true,"message":"ok"}"#.utf8),
+                    200
+                )
+            case ("GET", "/v1/projects/current/status"):
+                return (Self.statusData, 200)
+            case ("GET", "/v1/projects/removed-project/status"):
+                return (Data("project removed".utf8), 404)
+            case ("POST", "/v1/work/claim"):
+                return (workData, 200)
+            case ("POST", let path?) where path.hasSuffix("/result"):
+                return (
+                    Data(#"{"accepted":true,"message":"recorded"}"#.utf8),
+                    200
+                )
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(handlers: [])
+        )
+
+        manager.start()
+        defer { manager.stop() }
+
+        for _ in 0..<20 {
+            if recorder.paths.filter({ $0 == "/v1/work/claim" }).count >= 2 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        let paths = recorder.paths
+        let failedStatusIndex = try #require(
+            paths.firstIndex(of: "/v1/projects/removed-project/status")
+        )
+        let laterClaimIndex = try #require(
+            paths[(failedStatusIndex + 1)...]
+                .firstIndex(of: "/v1/work/claim")
+        )
+        #expect(laterClaimIndex > failedStatusIndex)
+        #expect(manager.currentProject == "removed-project")
+        #expect(manager.projectStatus?.projectID == "display")
+        #expect(manager.isContributing)
+    }
+
     private static let statusData = Data(
         #"{"projectID":"display","workloadID":"test","totalWorkUnits":1,"pendingWorkUnits":0,"assignedWorkUnits":0,"completedWorkUnits":1,"retryCount":0}"#.utf8
     )
