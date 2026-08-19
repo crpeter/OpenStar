@@ -47,25 +47,35 @@ struct ContentView: View {
 
     private var contributionCard: some View {
         VStack(spacing: 18) {
-            HStack {
+            HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Node Status")
+                    Text("Worker Activity")
                         .font(.headline)
 
                     Text(manager.statusText)
+                        .font(.title3.bold())
                         .foregroundStyle(
                             manager.errorMessage == nil
-                                ? Color.secondary
+                                ? Color.primary
                                 : Color.red
                         )
+                        .lineLimit(1)
+
+                    Text(activityContext)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer()
-
-                if manager.isContributing {
+                if manager.currentWorkUnitID != nil {
                     ProgressView()
+                        .controlSize(.large)
+                        .accessibilityLabel("Worker is processing work")
                 }
             }
+            .frame(height: 76)
 
             Button {
                 if manager.isContributing {
@@ -96,6 +106,25 @@ struct ContentView: View {
         )
     }
 
+    private var activityContext: String {
+        if let errorMessage = manager.errorMessage {
+            return errorMessage
+        }
+
+        if let project = manager.currentProject,
+           let workload = manager.currentWorkloadID {
+            return "\(project)  ·  \(workload)"
+        }
+
+        if manager.isContributing {
+            return manager.availability == .available
+                ? "Looking for compatible work"
+                : "Device environment unavailable"
+        }
+
+        return "Ready to contribute"
+    }
+
     private var projectCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Current Project")
@@ -107,33 +136,21 @@ struct ContentView: View {
                     status.projectID
                 )
 
-                if let targetName = status.targetName,
-                   !targetName.isEmpty {
-                    infoRow(
-                        "Display Target",
-                        targetName
-                    )
-                }
+                infoRow(
+                    "Display Target",
+                    status.targetName.flatMap {
+                        $0.isEmpty ? nil : $0
+                    } ?? "—"
+                )
 
                 infoRow(
                     "Workload",
                     status.workloadID
                 )
 
-                HStack {
-                    Text("Progress")
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    Text(
-                        "\(Int(status.progress * 100))%"
-                    )
-                    .monospacedDigit()
-                }
-
-                ProgressView(
-                    value: status.progress
+                infoRow(
+                    "Project Progress",
+                    "\(Int(status.progress * 100))%"
                 )
 
                 infoRow(
@@ -156,12 +173,10 @@ struct ContentView: View {
                     "\(status.retryCount)"
                 )
 
-                if let failed = status.failedWorkUnits {
-                    infoRow(
-                        "Failed",
-                        "\(failed)"
-                    )
-                }
+                infoRow(
+                    "Failed",
+                    status.failedWorkUnits.map { "\($0)" } ?? "—"
+                )
             } else {
                 Text(
                     "Connect to the coordinator to load the current project."
@@ -396,7 +411,13 @@ struct ContentView: View {
             Text(value)
                 .multilineTextAlignment(.trailing)
                 .monospacedDigit()
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
+                .accessibilityValue(value)
         }
+        .frame(minHeight: 20)
     }
 }
 
