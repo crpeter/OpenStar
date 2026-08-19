@@ -151,10 +151,20 @@ struct ContentView: View {
                     status.workloadID
                 )
 
-                infoRow(
-                    "Project Progress",
-                    "\(Int(status.progress * 100))%"
-                )
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Project Progress")
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Text("\(Int(status.progress * 100))%")
+                            .monospacedDigit()
+                    }
+
+                    ProgressView(value: status.progress)
+                }
+                .frame(height: 42)
 
                 infoRow(
                     "Completed",
@@ -202,6 +212,10 @@ struct ContentView: View {
             if let summary = manager.lastResultSummary {
                 Text(summary.title)
                     .font(.subheadline.bold())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(summary.title)
 
                 ForEach(summary.fields) { field in
                     infoRow(
@@ -240,28 +254,22 @@ struct ContentView: View {
                 )
             )
 
-            if let project = manager.currentProject {
-                infoRow(
-                    "Project",
-                    project
-                )
-            }
+            infoRow(
+                "Project",
+                manager.currentProject ?? "—"
+            )
 
-            if let workloadID = manager.currentWorkloadID {
-                infoRow(
-                    "Workload",
-                    workloadID
-                )
-            }
+            infoRow(
+                "Workload",
+                manager.currentWorkloadID ?? "—"
+            )
 
-            if let workID = manager.currentWorkUnitID {
-                infoRow(
-                    "Work Unit",
-                    String(
-                        workID.uuidString.prefix(8)
-                    )
-                )
-            }
+            infoRow(
+                "Work Unit",
+                manager.currentWorkUnitID.map {
+                    String($0.uuidString.prefix(8))
+                } ?? "—"
+            )
         }
         .padding()
         .background(.regularMaterial)
@@ -384,15 +392,15 @@ struct ContentView: View {
                 )
             )
 
-            if let duration = manager.lastWorkUnitDuration {
-                infoRow(
-                    "Last Work Unit",
+            infoRow(
+                "Last Work Unit",
+                manager.lastWorkUnitDuration.map {
                     String(
                         format: "%.4f sec",
-                        duration
+                        $0
                     )
-                )
-            }
+                } ?? "—"
+            )
         }
         .padding()
         .background(.regularMaterial)
