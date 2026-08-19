@@ -66,6 +66,9 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help(activityContext)
+                        .accessibilityValue(activityContext)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
