@@ -33,6 +33,7 @@ final class ContributionManager {
     private(set) var currentWorkloadID: String?
     private(set) var currentWorkUnitID: UUID?
     private(set) var projectStatus: ProjectStatus?
+    private(set) var isSubmitting = false
 
     private(set) var errorMessage: String?
 
@@ -70,23 +71,27 @@ final class ContributionManager {
     }
 
     var statusText: String {
-        if let errorMessage {
-            return errorMessage
+        if errorMessage != nil {
+            return "Error"
         }
 
         if isContributing {
             if availability == .temporarilyUnavailable {
-                return "Paused while device environment is unavailable"
+                return "Waiting"
             }
 
-            if let currentWorkloadID {
-                return "Computing \(currentWorkloadID)"
+            if isSubmitting {
+                return "Submitting"
             }
 
-            return "Waiting for compatible work"
+            if currentWorkloadID != nil {
+                return "Working"
+            }
+
+            return "Waiting"
         }
 
-        return "Ready"
+        return "Idle"
     }
 
     var supportedWorkloads: [WorkloadCapability] {
@@ -226,9 +231,11 @@ final class ContributionManager {
                     // merely because its first submission hit a transient
                     // network error. Retry the exact same work-unit
                     // result before this worker claims anything else.
+                    isSubmitting = true
                     let receipt = try await submitWithRetry(
                         result: result
                     )
+                    isSubmitting = false
 
                     if receipt.accepted {
                         unitsAccepted += 1
@@ -258,6 +265,7 @@ final class ContributionManager {
 
             currentWorkUnitID = nil
             currentWorkloadID = nil
+            isSubmitting = false
             isContributing = false
             task = nil
         }
