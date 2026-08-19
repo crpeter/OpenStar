@@ -136,13 +136,12 @@ struct ContentView: View {
                     status.projectID
                 )
 
-                if let targetName = status.targetName,
-                   !targetName.isEmpty {
-                    infoRow(
-                        "Display Target",
-                        targetName
-                    )
-                }
+                infoRow(
+                    "Display Target",
+                    status.targetName.flatMap {
+                        $0.isEmpty ? nil : $0
+                    } ?? "—"
+                )
 
                 infoRow(
                     "Workload",
@@ -174,12 +173,10 @@ struct ContentView: View {
                     "\(status.retryCount)"
                 )
 
-                if let failed = status.failedWorkUnits {
-                    infoRow(
-                        "Failed",
-                        "\(failed)"
-                    )
-                }
+                infoRow(
+                    "Failed",
+                    status.failedWorkUnits.map { "\($0)" } ?? "—"
+                )
             } else {
                 Text(
                     "Connect to the coordinator to load the current project."
@@ -416,6 +413,9 @@ struct ContentView: View {
                 .monospacedDigit()
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
+                .accessibilityValue(value)
         }
         .frame(minHeight: 20)
     }
