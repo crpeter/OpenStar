@@ -219,9 +219,15 @@ struct OpenStarTests {
         let reused = worker.preparedDatasetDebugState(
             projectID: "a", datasetID: "shared"
         )
+        let values: [Float] = [0, 1, 0, -1, 0, 1]
+        let sequentialTotalValueSquared = values.reduce(Float(0)) {
+            $0 + $1 * $1
+        }
 
         #expect(initial.coordinateBuffer == reused.coordinateBuffer)
         #expect(initial.valueBuffer == reused.valueBuffer)
+        #expect(initial.totalValueSquared == sequentialTotalValueSquared)
+        #expect(initial.totalValueSquared == reused.totalValueSquared)
         #expect(reused.preparations == 1)
         #expect(
             first.legacyResultFields.bestPower ==
@@ -260,8 +266,30 @@ struct OpenStarTests {
             projectID: "a", datasetID: "shared"
         )
         #expect(rebuilt.coordinateBuffer != initial.coordinateBuffer)
+        #expect(rebuilt.totalValueSquared == initial.totalValueSquared)
         #expect(rebuilt.count == 2)
         #expect(rebuilt.preparations == 4)
+    }
+
+    @Test func lombScargleRejectsZeroNormalizationDataset() async throws {
+        let worker = try LombScargleWorker()
+
+        await #expect(throws: LombScargleError.self) {
+            try await worker.execute(
+                workUnit: scopedWorkUnit(
+                    projectID: "project",
+                    datasetID: "zero",
+                    payload: .object([
+                        "startFrequency": .number(0.1),
+                        "frequencyStep": .number(0.01),
+                        "frequencyCount": .number(2)
+                    ])
+                ),
+                datasetData: Data(
+                    #"{"coordinates":[0,1],"values":[0,0]}"#.utf8
+                )
+            )
+        }
     }
 
     @Test func lombScargleExecutionStillHonorsCancellation() async throws {

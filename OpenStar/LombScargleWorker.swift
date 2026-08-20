@@ -166,17 +166,20 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
     private final class PreparedDataset: @unchecked Sendable {
         let coordinates: [Float]
         let values: [Float]
+        let totalValueSquared: Float
         let coordinateBuffer: MTLBuffer
         let valueBuffer: MTLBuffer
 
         init(
             coordinates: [Float],
             values: [Float],
+            totalValueSquared: Float,
             coordinateBuffer: MTLBuffer,
             valueBuffer: MTLBuffer
         ) {
             self.coordinates = coordinates
             self.values = values
+            self.totalValueSquared = totalValueSquared
             self.coordinateBuffer = coordinateBuffer
             self.valueBuffer = valueBuffer
         }
@@ -224,6 +227,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         func debugState(for key: DatasetCacheKey) -> (
             coordinateBuffer: ObjectIdentifier?,
             valueBuffer: ObjectIdentifier?,
+            totalValueSquared: Float?,
             count: Int,
             preparations: Int
         ) {
@@ -233,6 +237,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
             return (
                 value.map { ObjectIdentifier($0.coordinateBuffer as AnyObject) },
                 value.map { ObjectIdentifier($0.valueBuffer as AnyObject) },
+                value?.totalValueSquared,
                 values.count,
                 preparationCount
             )
@@ -527,6 +532,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
     ) -> (
         coordinateBuffer: ObjectIdentifier?,
         valueBuffer: ObjectIdentifier?,
+        totalValueSquared: Float?,
         count: Int,
         preparations: Int
     ) {
@@ -559,6 +565,15 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
             )
         }
 
+        var totalValueSquared: Float = 0
+        for value in dataset.values {
+            totalValueSquared += value * value
+        }
+        guard totalValueSquared.isFinite,
+              totalValueSquared > 0 else {
+            throw LombScargleError.invalidDataset
+        }
+
         let byteCount = dataset.coordinates.count * MemoryLayout<Float>.stride
         guard let coordinateBuffer = device.makeBuffer(
             bytes: dataset.coordinates,
@@ -575,6 +590,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         return PreparedDataset(
             coordinates: dataset.coordinates,
             values: dataset.values,
+            totalValueSquared: totalValueSquared,
             coordinateBuffer: coordinateBuffer,
             valueBuffer: valueBuffer
         )
@@ -621,6 +637,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         var gpuSampleCount = UInt32(sampleCount)
         var startFrequency = payload.startFrequency
         var frequencyStep = payload.frequencyStep
+        var totalValueSquared = dataset.totalValueSquared
 
         encoder.setBytes(
             &gpuSampleCount,
@@ -638,6 +655,12 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
             &frequencyStep,
             length: MemoryLayout<Float>.stride,
             index: 5
+        )
+
+        encoder.setBytes(
+            &totalValueSquared,
+            length: MemoryLayout<Float>.stride,
+            index: 6
         )
 
         let executionWidth = pipeline.threadExecutionWidth
