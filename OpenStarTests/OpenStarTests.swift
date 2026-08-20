@@ -31,6 +31,45 @@ struct OpenStarTests {
         #expect(controller.desiredBatchCount == 16)
     }
 
+    @Test func adaptiveBatchControllerIgnoresIsolatedOverrun() {
+        let controller = AdaptiveBatchController()
+        for _ in 0..<3 { _ = controller.observe(metalDuration: 0.005) }
+
+        let counts = [0.054, 0.063, 0.055].map {
+            controller.observe(metalDuration: $0)
+        }
+
+        #expect(counts == [8, 8, 8])
+    }
+
+    @Test func adaptiveBatchControllerShrinksAfterConsecutiveOverruns() {
+        let controller = AdaptiveBatchController()
+        for _ in 0..<3 { _ = controller.observe(metalDuration: 0.005) }
+
+        let counts = [0.063, 0.064].map {
+            controller.observe(metalDuration: $0)
+        }
+
+        #expect(counts == [8, 4])
+    }
+
+    @Test func adaptiveBatchControllerShrinksImmediatelyForSevereOverrun() {
+        let controller = AdaptiveBatchController()
+        for _ in 0..<3 { _ = controller.observe(metalDuration: 0.005) }
+
+        #expect(controller.observe(metalDuration: 0.080) == 4)
+    }
+
+    @Test func adaptiveBatchControllerCanGrowAgainAfterShrink() {
+        let controller = AdaptiveBatchController()
+        for _ in 0..<3 { _ = controller.observe(metalDuration: 0.005) }
+        #expect(controller.observe(metalDuration: 0.080) == 4)
+
+        for _ in 0..<10 { _ = controller.observe(metalDuration: 0.005) }
+
+        #expect(controller.desiredBatchCount > 4)
+    }
+
     @Test func adaptiveBatchControllerTargetBandIgnoresStaleSlowEWMA() {
         let controller = AdaptiveBatchController()
         for _ in 0..<5 { _ = controller.observe(metalDuration: 0) }

@@ -69,6 +69,7 @@ final class AdaptiveBatchController: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 1
     private var smoothedDuration: Double?
+    private var consecutiveOverruns = 0
 
     var desiredBatchCount: Int { lock.withLock { count } }
 
@@ -76,13 +77,25 @@ final class AdaptiveBatchController: @unchecked Sendable {
     func observe(metalDuration: Double) -> Int {
         lock.withLock {
             guard metalDuration.isFinite, metalDuration >= 0 else { return count }
-            // Long dispatches shrink immediately; short observations ramp
-            // quickly while smoothing noise around the target range.
-            if metalDuration > 0.060 {
+            // Severe dispatches shrink immediately. Less extreme overruns
+            // must repeat so an isolated timing spike does not destabilize
+            // an otherwise suitable batch size.
+            if metalDuration > 0.075 {
                 count = max(count / 2, 1)
                 smoothedDuration = metalDuration
+                consecutiveOverruns = 0
                 return count
             }
+            if metalDuration > 0.060 {
+                consecutiveOverruns += 1
+                if consecutiveOverruns >= 2 {
+                    count = max(count / 2, 1)
+                    smoothedDuration = metalDuration
+                    consecutiveOverruns = 0
+                }
+                return count
+            }
+            consecutiveOverruns = 0
             let smoothed = smoothedDuration.map { $0 * 0.6 + metalDuration * 0.4 }
                 ?? metalDuration
             smoothedDuration = smoothed
