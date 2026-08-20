@@ -70,6 +70,7 @@ final class AdaptiveBatchController: @unchecked Sendable {
     private var count = 1
     private var smoothedDuration: Double?
     private var consecutiveOverruns = 0
+    private var growthCooldown = 0
 
     var desiredBatchCount: Int { lock.withLock { count } }
 
@@ -77,33 +78,52 @@ final class AdaptiveBatchController: @unchecked Sendable {
     func observe(metalDuration: Double) -> Int {
         lock.withLock {
             guard metalDuration.isFinite, metalDuration >= 0 else { return count }
-            // Severe dispatches shrink immediately. Less extreme overruns
-            // must repeat so an isolated timing spike does not destabilize
-            // an otherwise suitable batch size.
+
             if metalDuration > 0.075 {
                 count = max(count / 2, 1)
                 smoothedDuration = metalDuration
                 consecutiveOverruns = 0
+                growthCooldown = 8
                 return count
             }
+
             if metalDuration > 0.060 {
                 consecutiveOverruns += 1
+
                 if consecutiveOverruns >= 2 {
                     count = max(count / 2, 1)
                     smoothedDuration = metalDuration
                     consecutiveOverruns = 0
+                    growthCooldown = 8
+                }
+
+                return count
+            }
+
+            consecutiveOverruns = 0
+
+            let smoothed = smoothedDuration.map {
+                $0 * 0.6 + metalDuration * 0.4
+            } ?? metalDuration
+
+            smoothedDuration = smoothed
+
+            if metalDuration >= 0.035 {
+                if growthCooldown > 0 {
+                    growthCooldown -= 1
                 }
                 return count
             }
-            consecutiveOverruns = 0
-            let smoothed = smoothedDuration.map { $0 * 0.6 + metalDuration * 0.4 }
-                ?? metalDuration
-            smoothedDuration = smoothed
-            // A deliberately wide hysteresis band around the 40--50 ms goal.
-            // Raw observations in the target band hold even when EWMA still
-            // reflects an earlier slow dispatch. Smoothing only gates growth.
-            if metalDuration >= 0.035 { return count }
-            if smoothed < 0.035 { count = min(count * 2, 128) }
+
+            if growthCooldown > 0 {
+                growthCooldown -= 1
+                return count
+            }
+
+            if smoothed < 0.035 {
+                count = min(count * 2, 128)
+            }
+
             return count
         }
     }
