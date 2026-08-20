@@ -56,6 +56,10 @@ extension LombScargleError: WorkFailureClassifyingError {
             "backgroundexecutionnotpermitted"
         ) || message.contains(
             "submit gpu work from background"
+        ) || message.contains(
+            "kiogpucommandbuffercallbackerrorimpactinginteractivity"
+        ) || message.contains(
+            "impacting interactivity"
         )
     }
 }
