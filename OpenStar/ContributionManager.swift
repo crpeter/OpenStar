@@ -44,13 +44,22 @@ final class ContributionManager {
 
     private let coordinator: CoordinatorClient
     private let workloadRouter: WorkloadRouter?
+    private let projectStatusRefreshInterval: Duration
+    private let initialEmptyClaimBackoff: Duration
+    private let maximumEmptyClaimBackoff: Duration
+    private let emptyClaimSleep: @Sendable (Duration) async throws -> Void
 
     private var datasets: [DatasetCacheKey: Data] = [:]
     private var task: Task<Void, Never>?
+    private var projectStatusTask: Task<Void, Never>?
 
     init() {
         nodeID = NodeIdentity.id
         coordinator = CoordinatorClient()
+        projectStatusRefreshInterval = .seconds(5)
+        initialEmptyClaimBackoff = .milliseconds(25)
+        maximumEmptyClaimBackoff = .milliseconds(500)
+        emptyClaimSleep = { try await Task.sleep(for: $0) }
 
         do {
             workloadRouter = try WorkloadRouter()
@@ -63,11 +72,21 @@ final class ContributionManager {
     init(
         nodeID: UUID = UUID(),
         coordinator: CoordinatorClient,
-        workloadRouter: WorkloadRouter
+        workloadRouter: WorkloadRouter,
+        projectStatusRefreshInterval: Duration = .seconds(5),
+        initialEmptyClaimBackoff: Duration = .milliseconds(25),
+        maximumEmptyClaimBackoff: Duration = .milliseconds(500),
+        emptyClaimSleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        }
     ) {
         self.nodeID = nodeID
         self.coordinator = coordinator
         self.workloadRouter = workloadRouter
+        self.projectStatusRefreshInterval = projectStatusRefreshInterval
+        self.initialEmptyClaimBackoff = initialEmptyClaimBackoff
+        self.maximumEmptyClaimBackoff = maximumEmptyClaimBackoff
+        self.emptyClaimSleep = emptyClaimSleep
     }
 
     var statusText: String {
@@ -118,7 +137,9 @@ final class ContributionManager {
 
             do {
                 try await registerNode()
-                await refreshProjectStatus()
+                startProjectStatusRefresh()
+
+                var emptyClaimBackoff = initialEmptyClaimBackoff
 
                 while !Task.isCancelled {
                     capabilities = DeviceCapabilities.current()
@@ -135,12 +156,17 @@ final class ContributionManager {
                     guard let workUnit = try await coordinator.claimWork(
                         nodeID: nodeID
                     ) else {
-                        await refreshProjectStatus()
-                        try await Task.sleep(
-                            for: .seconds(1)
+                        try await emptyClaimSleep(emptyClaimBackoff)
+                        emptyClaimBackoff = min(
+                            emptyClaimBackoff * 2,
+                            maximumEmptyClaimBackoff
                         )
                         continue
                     }
+
+                    // A successful claim means work is flowing. Return to the
+                    // shortest poll delay for the next genuinely empty claim.
+                    emptyClaimBackoff = initialEmptyClaimBackoff
 
                     currentProject = workUnit.projectID
                     currentWorkloadID = workUnit.workloadID
@@ -249,8 +275,6 @@ final class ContributionManager {
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
 
-                    await refreshProjectStatus()
-
                     await Task.yield()
                 }
             } catch is CancellationError {
@@ -267,13 +291,28 @@ final class ContributionManager {
             currentWorkloadID = nil
             isSubmitting = false
             isContributing = false
+            projectStatusTask?.cancel()
+            projectStatusTask = nil
             task = nil
         }
     }
 
     func stop() {
         task?.cancel()
+        projectStatusTask?.cancel()
         isContributing = false
+    }
+
+    private func startProjectStatusRefresh() {
+        projectStatusTask?.cancel()
+        projectStatusTask = Task { [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                await refreshProjectStatus()
+                try? await Task.sleep(for: projectStatusRefreshInterval)
+            }
+        }
     }
 
     private func classifyFailure(
