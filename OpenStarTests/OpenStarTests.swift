@@ -6,6 +6,98 @@ import Testing
 struct OpenStarTests {
     private let workID = UUID()
 
+    private func referenceLombScarglePower(
+        coordinates: [Float], values: [Float], frequency: Double
+    ) -> Double {
+        let omega = 2 * Double.pi * frequency
+        var sumSin2 = 0.0
+        var sumCos2 = 0.0
+        for coordinate in coordinates {
+            sumSin2 += sin(2 * omega * Double(coordinate))
+            sumCos2 += cos(2 * omega * Double(coordinate))
+        }
+        let tau = atan2(sumSin2, sumCos2) / (2 * omega)
+        var sumYCos = 0.0
+        var sumYSin = 0.0
+        var sumCosSquared = 0.0
+        var sumSinSquared = 0.0
+        var totalValueSquared = 0.0
+        for index in coordinates.indices {
+            let value = Double(values[index])
+            let angle = omega * (Double(coordinates[index]) - tau)
+            let cosine = cos(angle)
+            let sine = sin(angle)
+            sumYCos += value * cosine
+            sumYSin += value * sine
+            sumCosSquared += cosine * cosine
+            sumSinSquared += sine * sine
+            totalValueSquared += value * value
+        }
+        return ((sumYCos * sumYCos) / sumCosSquared
+            + (sumYSin * sumYSin) / sumSinSquared) / totalValueSquared
+    }
+
+    @Test func lombScargleCachedDoubleValidatorPreservesValidationContract() throws {
+        let coordinates = (0..<40).map { Float($0) / 10 }
+        let values = coordinates.map { sin(2 * Float.pi * 0.5 * $0) }
+        let doubles = values.map(Double.init)
+        let dataset = LombScargleValidationDataset(
+            coordinates: coordinates.map(Double.init),
+            values: doubles,
+            totalValueSquared: doubles.reduce(0) { $0 + $1 * $1 }
+        )
+        let start: Float = 0.4
+        let step: Float = 0.1
+        let expected = referenceLombScarglePower(
+            coordinates: coordinates, values: values,
+            frequency: Double(start) + Double(step)
+        )
+        let validation = try LombScargleCPUValidator.validate(
+            dataset: dataset, metalBestIndex: 1, metalBestPower: expected,
+            startFrequency: start, frequencyStep: step, frequencyCount: 3
+        )
+
+        #expect(validation.passed)
+        #expect(validation.reason == "Local Float64 integrity check passed.")
+        #expect(validation.metalBestIndex == 1)
+        #expect(validation.cpuBestLocalIndex == 1)
+        #expect(validation.metalBestPower == expected)
+        #expect(validation.cpuPowerAtMetalWinner == expected)
+        #expect(validation.absolutePowerError == 0)
+        #expect(validation.allowedPowerError == max(5e-5, abs(expected) * 0.01))
+
+        let beginning = try LombScargleCPUValidator.validate(
+            dataset: dataset, metalBestIndex: 0,
+            metalBestPower: referenceLombScarglePower(
+                coordinates: coordinates, values: values, frequency: Double(start)
+            ), startFrequency: start, frequencyStep: step, frequencyCount: 3
+        )
+        let end = try LombScargleCPUValidator.validate(
+            dataset: dataset, metalBestIndex: 2,
+            metalBestPower: referenceLombScarglePower(
+                coordinates: coordinates, values: values,
+                frequency: Double(start) + 2 * Double(step)
+            ), startFrequency: start, frequencyStep: step, frequencyCount: 3
+        )
+        #expect((0...1).contains(beginning.cpuBestLocalIndex))
+        #expect((1...2).contains(end.cpuBestLocalIndex))
+
+        let incorrectPower = try LombScargleCPUValidator.validate(
+            dataset: dataset, metalBestIndex: 1, metalBestPower: expected + 1,
+            startFrequency: start, frequencyStep: step, frequencyCount: 3
+        )
+        #expect(!incorrectPower.passed)
+        #expect(incorrectPower.reason.contains("GPU power"))
+
+        let nonMaximum = try LombScargleCPUValidator.validate(
+            dataset: dataset, metalBestIndex: 0,
+            metalBestPower: beginning.cpuPowerAtMetalWinner,
+            startFrequency: start, frequencyStep: step, frequencyCount: 3
+        )
+        #expect(!nonMaximum.passed)
+        #expect(nonMaximum.reason.contains("is not a local maximum"))
+    }
+
     @Test func adaptiveBatchControllerLearnsWithHysteresisAndBounds() {
         let controller = AdaptiveBatchController()
         #expect(controller.desiredBatchCount == 1)
@@ -567,6 +659,7 @@ struct OpenStarTests {
 
         #expect(initial.coordinateBuffer == reused.coordinateBuffer)
         #expect(initial.valueBuffer == reused.valueBuffer)
+        #expect(initial.validationDataset == reused.validationDataset)
         #expect(initial.totalValueSquared == sequentialTotalValueSquared)
         #expect(initial.totalValueSquared == reused.totalValueSquared)
         #expect(reused.preparations == 1)
@@ -607,6 +700,7 @@ struct OpenStarTests {
             projectID: "a", datasetID: "shared"
         )
         #expect(rebuilt.coordinateBuffer != nil)
+        #expect(rebuilt.validationDataset != initial.validationDataset)
         #expect(rebuilt.totalValueSquared == initial.totalValueSquared)
         #expect(rebuilt.count == 2)
         #expect(rebuilt.preparations == 4)

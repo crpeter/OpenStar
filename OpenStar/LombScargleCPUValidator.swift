@@ -46,12 +46,28 @@ enum LombScargleValidationError: LocalizedError {
     }
 }
 
+/// Immutable, validation-ready representation of a prepared dataset.
+nonisolated
+final class LombScargleValidationDataset: @unchecked Sendable {
+    let coordinates: [Double]
+    let values: [Double]
+    let totalValueSquared: Double
+
+    init(coordinates: [Double], values: [Double], totalValueSquared: Double) {
+        self.coordinates = coordinates
+        self.values = values
+        self.totalValueSquared = totalValueSquared
+    }
+}
+
 nonisolated
 enum LombScargleCPUValidator {
     private static let absolutePowerTolerance = 5.0e-5
     private static let relativePowerTolerance = 0.01
     private static let localMaximumRelativeTolerance = 0.01
 
+    /// Compatibility entry point for standalone validator callers. Worker hot
+    /// paths use the validation-ready dataset overload below.
     static func validate(
         coordinates: [Float],
         values: [Float],
@@ -61,13 +77,36 @@ enum LombScargleCPUValidator {
         frequencyStep: Float,
         frequencyCount: Int
     ) throws -> LombScargleValidation {
-        guard !coordinates.isEmpty else {
+        let valuesDouble = values.map(Double.init)
+        return try validate(
+            dataset: LombScargleValidationDataset(
+                coordinates: coordinates.map(Double.init),
+                values: valuesDouble,
+                totalValueSquared: valuesDouble.reduce(0) { $0 + $1 * $1 }
+            ),
+            metalBestIndex: metalBestIndex,
+            metalBestPower: metalBestPower,
+            startFrequency: startFrequency,
+            frequencyStep: frequencyStep,
+            frequencyCount: frequencyCount
+        )
+    }
+
+    static func validate(
+        dataset: LombScargleValidationDataset,
+        metalBestIndex: Int,
+        metalBestPower: Double,
+        startFrequency: Float,
+        frequencyStep: Float,
+        frequencyCount: Int
+    ) throws -> LombScargleValidation {
+        guard !dataset.coordinates.isEmpty else {
             throw LombScargleValidationError.invalidInput(
                 "dataset is empty"
             )
         }
 
-        guard coordinates.count == values.count else {
+        guard dataset.coordinates.count == dataset.values.count else {
             throw LombScargleValidationError.invalidInput(
                 "coordinate/value sample counts differ"
             )
@@ -114,8 +153,7 @@ enum LombScargleCPUValidator {
                 Double(index) * Double(frequencyStep)
 
             let power = try powerMatchingMetalFormula(
-                coordinates: coordinates,
-                values: values,
+                dataset: dataset,
                 frequency: frequency
             )
 
@@ -196,8 +234,7 @@ enum LombScargleCPUValidator {
     }
 
     private static func powerMatchingMetalFormula(
-        coordinates: [Float],
-        values: [Float],
+        dataset: LombScargleValidationDataset,
         frequency: Double
     ) throws -> Double {
         guard frequency.isFinite,
@@ -213,9 +250,7 @@ enum LombScargleCPUValidator {
         var sumSin2 = 0.0
         var sumCos2 = 0.0
 
-        for coordinateFloat in coordinates {
-            let coordinate = Double(coordinateFloat)
-
+        for coordinate in dataset.coordinates {
             guard coordinate.isFinite else {
                 throw LombScargleValidationError.invalidInput(
                     "coordinate sample is not finite"
@@ -236,11 +271,10 @@ enum LombScargleCPUValidator {
         var sumYSin = 0.0
         var sumCosSquared = 0.0
         var sumSinSquared = 0.0
-        var totalValueSquared = 0.0
 
-        for index in coordinates.indices {
-            let coordinate = Double(coordinates[index])
-            let value = Double(values[index])
+        for index in dataset.coordinates.indices {
+            let coordinate = dataset.coordinates[index]
+            let value = dataset.values[index]
 
             guard value.isFinite else {
                 throw LombScargleValidationError.invalidInput(
@@ -258,12 +292,12 @@ enum LombScargleCPUValidator {
 
             sumCosSquared += cosine * cosine
             sumSinSquared += sine * sine
-            totalValueSquared += value * value
         }
 
         guard sumCosSquared > 0,
               sumSinSquared > 0,
-              totalValueSquared > 0 else {
+              dataset.totalValueSquared.isFinite,
+              dataset.totalValueSquared > 0 else {
             throw LombScargleValidationError.invalidInput(
                 "degenerate Lomb-Scargle normalization"
             )
@@ -279,7 +313,7 @@ enum LombScargleCPUValidator {
 
         let power =
             (cosinePower + sinePower) /
-            totalValueSquared
+            dataset.totalValueSquared
 
         guard power.isFinite else {
             throw LombScargleValidationError.invalidInput(
