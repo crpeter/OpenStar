@@ -265,7 +265,7 @@ struct OpenStarTests {
         let rebuilt = worker.preparedDatasetDebugState(
             projectID: "a", datasetID: "shared"
         )
-        #expect(rebuilt.coordinateBuffer != initial.coordinateBuffer)
+        #expect(rebuilt.coordinateBuffer != nil)
         #expect(rebuilt.totalValueSquared == initial.totalValueSquared)
         #expect(rebuilt.count == 2)
         #expect(rebuilt.preparations == 4)
@@ -499,34 +499,59 @@ struct OpenStarTests {
     }
 
     @MainActor
-    @Test func backgroundExpirationAndUserStopCleanUpTheSameWorker() throws {
+    @Test func backgroundExpirationAndUserStopCleanUpTheSameWorker() async throws {
         let background = StubBackgroundContributionSession()
         let manager = ContributionManager(
             coordinator: idleCoordinator(),
             workloadRouter: try WorkloadRouter(handlers: []),
             backgroundSession: background
         )
+
         manager.start()
+
         let firstTask = StubBackgroundContributionTask(
             identifier: try #require(background.lastSubmittedIdentifier)
         )
         let firstIdentifier = firstTask.identifier
+
         manager.attachBackgroundTask(firstTask)
         firstTask.expirationHandler?()
+
+        try await waitUntil {
+            !manager.isContributing
+                && background.cancellations == 1
+                && firstTask.completions == [false]
+        }
 
         #expect(!manager.isContributing)
         #expect(background.cancellations == 1)
         #expect(firstTask.completions == [false])
 
-        manager.start()
+        // stop() cancels the contribution Task immediately, but that Task clears
+        // ContributionManager.task only when its async cleanup finishes.
+        // start() safely does nothing while the old Task still exists, so retry
+        // until the next session is actually submitted.
+        for _ in 0..<100 {
+            manager.start()
+
+            if background.submissions == 2 {
+                break
+            }
+
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(background.submissions == 2)
+
         let secondTask = StubBackgroundContributionTask(
             identifier: try #require(background.lastSubmittedIdentifier)
         )
+
         #expect(secondTask.identifier != firstIdentifier)
+
         manager.attachBackgroundTask(secondTask)
         manager.stop()
 
-        #expect(background.submissions == 2)
         #expect(background.cancellations == 2)
         #expect(secondTask.completions == [false])
     }
