@@ -4,7 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.openstar.OpenStar.contribution</string>
+		<string>com.openstar.OpenStar.contribution.*</string>
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>

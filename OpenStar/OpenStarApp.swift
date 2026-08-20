@@ -14,9 +14,12 @@ struct OpenStarApp: App {
     init() {
         let manager = ContributionManager()
         _contributionManager = State(initialValue: manager)
-        BackgroundContributionSession.shared.register { [weak manager] task in
+        #if os(iOS)
+        BackgroundContributionSession.shared.register {
+            [weak manager] task in
             manager?.attachBackgroundTask(task)
         }
+        #endif
     }
 
     var body: some Scene {

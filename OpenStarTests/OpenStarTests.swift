@@ -478,9 +478,11 @@ struct OpenStarTests {
             workloadRouter: try WorkloadRouter(handlers: []),
             backgroundSession: background
         )
-        let firstTask = StubBackgroundContributionTask()
-
         manager.start()
+        let firstTask = StubBackgroundContributionTask(
+            identifier: try #require(background.lastSubmittedIdentifier)
+        )
+        let firstIdentifier = firstTask.identifier
         manager.attachBackgroundTask(firstTask)
         firstTask.expirationHandler?()
 
@@ -488,8 +490,11 @@ struct OpenStarTests {
         #expect(background.cancellations == 1)
         #expect(firstTask.completions == [false])
 
-        let secondTask = StubBackgroundContributionTask()
         manager.start()
+        let secondTask = StubBackgroundContributionTask(
+            identifier: try #require(background.lastSubmittedIdentifier)
+        )
+        #expect(secondTask.identifier != firstIdentifier)
         manager.attachBackgroundTask(secondTask)
         manager.stop()
 
@@ -497,6 +502,27 @@ struct OpenStarTests {
         #expect(background.cancellations == 2)
         #expect(secondTask.completions == [false])
     }
+
+    @Test func backgroundIdentifiersMatchWildcardAndAreUnique() {
+        let first = BackgroundContributionIdentifiers.session(UUID())
+        let second = BackgroundContributionIdentifiers.session(UUID())
+
+        #expect(BackgroundContributionIdentifiers.permitted ==
+            "com.openstar.OpenStar.contribution.*")
+        #expect(first.hasPrefix("com.openstar.OpenStar.contribution."))
+        #expect(second.hasPrefix("com.openstar.OpenStar.contribution."))
+        #expect(first != second)
+    }
+
+    #if !os(iOS)
+    @MainActor
+    @Test func unsupportedPlatformUsesForegroundOnlyBackgroundSession() throws {
+        let session = BackgroundContributionSession()
+        #expect(!session.register { _ in })
+        #expect(try session.submit() == nil)
+        session.cancel()
+    }
+    #endif
 
     @MainActor
     @Test func failedProjectStatusDoesNotPreventNextClaim() async throws {
@@ -776,6 +802,7 @@ private final class StubBackgroundContributionSession:
     private(set) var registrations = 0
     private(set) var submissions = 0
     private(set) var cancellations = 0
+    private(set) var lastSubmittedIdentifier: String?
 
     init(submitResult: Bool = true) {
         self.submitResult = submitResult
@@ -788,9 +815,12 @@ private final class StubBackgroundContributionSession:
         return registrations == 1
     }
 
-    func submit() throws -> Bool {
+    func submit() throws -> String? {
         submissions += 1
-        return submitResult
+        guard submitResult else { return nil }
+        let identifier = BackgroundContributionIdentifiers.session(UUID())
+        lastSubmittedIdentifier = identifier
+        return identifier
     }
 
     func cancel() {
@@ -800,9 +830,14 @@ private final class StubBackgroundContributionSession:
 
 @MainActor
 private final class StubBackgroundContributionTask: BackgroundContributionTask {
+    let identifier: String
     var expirationHandler: (() -> Void)?
     private(set) var acceptedCounts: [Int] = []
     private(set) var completions: [Bool] = []
+
+    init(identifier: String) {
+        self.identifier = identifier
+    }
 
     func recordAcceptedWork(unitsAccepted: Int) {
         acceptedCounts.append(unitsAccepted)

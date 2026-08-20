@@ -1,5 +1,17 @@
-import BackgroundTasks
 import Foundation
+
+#if os(iOS)
+import BackgroundTasks
+#endif
+
+enum BackgroundContributionIdentifiers {
+    static let base = "com.openstar.OpenStar.contribution"
+    static let permitted = "\(base).*"
+
+    static func session(_ id: UUID) -> String {
+        "\(base).\(id.uuidString)"
+    }
+}
 
 @MainActor
 protocol BackgroundContributionSessionSupporting: AnyObject {
@@ -7,25 +19,27 @@ protocol BackgroundContributionSessionSupporting: AnyObject {
     func register(
         launchHandler: @escaping (BackgroundContributionTask) -> Void
     ) -> Bool
-    func submit() throws -> Bool
+    func submit() throws -> String?
     func cancel()
 }
 
 @MainActor
 protocol BackgroundContributionTask: AnyObject {
+    var identifier: String { get }
     var expirationHandler: (() -> Void)? { get set }
     func recordAcceptedWork(unitsAccepted: Int)
     func complete(success: Bool)
 }
 
+#if os(iOS)
 @MainActor
 final class BackgroundContributionSession:
     BackgroundContributionSessionSupporting {
     static let shared = BackgroundContributionSession()
-    static let taskIdentifier = "com.openstar.OpenStar.contribution"
 
     private let scheduler: BGTaskScheduler
     private var registrationAttempted = false
+    private var submittedIdentifier: String?
 
     init(scheduler: BGTaskScheduler = .shared) {
         self.scheduler = scheduler
@@ -38,8 +52,8 @@ final class BackgroundContributionSession:
         guard !registrationAttempted else { return false }
         registrationAttempted = true
 
-        let registered = scheduler.register(
-            forTaskWithIdentifier: Self.taskIdentifier,
+        return scheduler.register(
+            forTaskWithIdentifier: BackgroundContributionIdentifiers.permitted,
             using: nil
         ) { task in
             guard let task = task as? BGContinuedProcessingTask else {
@@ -51,27 +65,29 @@ final class BackgroundContributionSession:
                 launchHandler(SystemBackgroundContributionTask(task: task))
             }
         }
-
-        return registered
     }
 
-    func submit() throws -> Bool {
-        guard scheduler.supportedResources.contains(.gpu) else {
-            return false
+    func submit() throws -> String? {
+        guard BGTaskScheduler.supportedResources.contains(.gpu) else {
+            return nil
         }
 
+        let identifier = BackgroundContributionIdentifiers.session(UUID())
         let request = BGContinuedProcessingTaskRequest(
-            identifier: Self.taskIdentifier,
+            identifier: identifier,
             title: "Contributing to OpenStar",
             subtitle: "Processing distributed science work"
         )
         request.requiredResources = .gpu
         try scheduler.submit(request)
-        return true
+        submittedIdentifier = identifier
+        return identifier
     }
 
     func cancel() {
-        scheduler.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
+        guard let submittedIdentifier else { return }
+        scheduler.cancel(taskRequestWithIdentifier: submittedIdentifier)
+        self.submittedIdentifier = nil
     }
 }
 
@@ -84,6 +100,8 @@ private final class SystemBackgroundContributionTask:
         self.task = task
         task.progress.totalUnitCount = -1
     }
+
+    var identifier: String { task.identifier }
 
     var expirationHandler: (() -> Void)? {
         get { task.expirationHandler }
@@ -99,3 +117,20 @@ private final class SystemBackgroundContributionTask:
         task.setTaskCompleted(success: success)
     }
 }
+#else
+@MainActor
+final class BackgroundContributionSession:
+    BackgroundContributionSessionSupporting {
+    static let shared = BackgroundContributionSession()
+
+    @discardableResult
+    func register(
+        launchHandler: @escaping (BackgroundContributionTask) -> Void
+    ) -> Bool {
+        false
+    }
+
+    func submit() throws -> String? { nil }
+    func cancel() {}
+}
+#endif

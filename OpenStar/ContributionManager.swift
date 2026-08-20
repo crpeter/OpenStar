@@ -56,6 +56,7 @@ final class ContributionManager {
     private var task: Task<Void, Never>?
     private var projectStatusTask: Task<Void, Never>?
     private var backgroundTask: BackgroundContributionTask?
+    private var backgroundRequestIdentifier: String?
     private var backgroundSessionInitialAcceptedCount = 0
 
     init() {
@@ -139,9 +140,10 @@ final class ContributionManager {
         errorMessage = nil
         isContributing = true
         backgroundSessionInitialAcceptedCount = unitsAccepted
+        backgroundRequestIdentifier = nil
 
         do {
-            _ = try backgroundSession.submit()
+            backgroundRequestIdentifier = try backgroundSession.submit()
         } catch {
             // A continued-processing request is an optional extension of the
             // foreground session. Submission failure must not prevent work.
@@ -331,7 +333,8 @@ final class ContributionManager {
     }
 
     func attachBackgroundTask(_ task: BackgroundContributionTask) {
-        guard isContributing else {
+        guard isContributing,
+              task.identifier == backgroundRequestIdentifier else {
             task.complete(success: false)
             return
         }
@@ -352,6 +355,7 @@ final class ContributionManager {
     private func finishBackgroundTask(success: Bool) {
         backgroundTask?.complete(success: success)
         backgroundTask = nil
+        backgroundRequestIdentifier = nil
     }
 
     private func startProjectStatusRefresh() {
