@@ -467,16 +467,24 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
     private static func compatibleGrid(
         previous: LombScargleWorkPayload, next: LombScargleWorkPayload
     ) -> Bool {
-        let stepScale = max(max(
-            abs(previous.frequencyStep), abs(next.frequencyStep)
-        ), 1)
+        let stepTolerance = 4 * max(
+            previous.frequencyStep.ulp,
+            next.frequencyStep.ulp
+        )
         guard abs(previous.frequencyStep - next.frequencyStep)
-                <= 8 * Float.ulpOfOne * stepScale else { return false }
+                <= stepTolerance else { return false }
         let expected = Double(previous.startFrequency)
             + Double(previous.frequencyCount) * Double(previous.frequencyStep)
         let actual = Double(next.startFrequency)
-        let scale = max(max(abs(expected), abs(actual)), 1)
-        return abs(expected - actual) <= 8 * Double(Float.ulpOfOne) * scale
+        let representationTolerance = 4 * Double(max(
+            Float(expected).ulp,
+            next.startFrequency.ulp
+        ))
+        // Float rounding near the grid location is allowed, but never enough
+        // to conceal even one percent of a frequency bin.
+        let gridTolerance = Double(abs(previous.frequencyStep)) * 0.01
+        return abs(expected - actual)
+            <= min(representationTolerance, gridTolerance)
     }
 
     static func allocatedDurations(

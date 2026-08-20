@@ -128,6 +128,57 @@ struct OpenStarTests {
             ])
         )
         #expect(LombScargleWorker.contiguousGroups([units[0], mismatchedStep]).count == 2)
+
+        let smallStep = Float(0.0000100)
+        let smallStart = Float(1) + Float(10) * smallStep
+        let smallPrevious = scopedWorkUnit(
+            projectID: "small", datasetID: "grid",
+            payload: .object([
+                "frequencyStartIndex": .number(0), "startFrequency": .number(1),
+                "frequencyStep": .number(Double(smallStep)),
+                "frequencyCount": .number(10)
+            ])
+        )
+        let materiallyDifferentStep = scopedWorkUnit(
+            projectID: "small", datasetID: "grid",
+            payload: .object([
+                "frequencyStartIndex": .number(10),
+                "startFrequency": .number(Double(smallStart)),
+                "frequencyStep": .number(0.0000105),
+                "frequencyCount": .number(10)
+            ])
+        )
+        #expect(LombScargleWorker.contiguousGroups(
+            [smallPrevious, materiallyDifferentStep]
+        ).count == 2)
+
+        let roundedStep = scopedWorkUnit(
+            projectID: "small", datasetID: "grid",
+            payload: .object([
+                "frequencyStartIndex": .number(10),
+                "startFrequency": .number(Double(smallStart)),
+                "frequencyStep": .number(Double(smallStep.nextUp)),
+                "frequencyCount": .number(10)
+            ])
+        )
+        #expect(LombScargleWorker.contiguousGroups(
+            [smallPrevious, roundedStep]
+        ).count == 1)
+
+        let shiftedStart = scopedWorkUnit(
+            projectID: "small", datasetID: "grid",
+            payload: .object([
+                "frequencyStartIndex": .number(10),
+                "startFrequency": .number(
+                    Double(smallStart + smallStep * 0.25)
+                ),
+                "frequencyStep": .number(Double(smallStep)),
+                "frequencyCount": .number(10)
+            ])
+        )
+        #expect(LombScargleWorker.contiguousGroups(
+            [smallPrevious, shiftedStart]
+        ).count == 2)
     }
 
     @Test func coordinatorBatchClaimDecodesObjectArrayAndEmpty() async throws {
