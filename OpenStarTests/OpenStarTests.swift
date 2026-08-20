@@ -6,6 +6,123 @@ import Testing
 struct OpenStarTests {
     private let workID = UUID()
 
+    @Test func adaptiveBatchControllerLearnsWithHysteresisAndBounds() {
+        let controller = AdaptiveBatchController()
+        #expect(controller.desiredBatchCount == 1)
+        #expect(controller.observe(metalDuration: 0.005) == 2)
+        #expect(controller.observe(metalDuration: 0.005) == 4)
+        #expect(controller.observe(metalDuration: 0.005) == 8)
+        for _ in 0..<10 { _ = controller.observe(metalDuration: 0.045) }
+        let stable = controller.desiredBatchCount
+        _ = controller.observe(metalDuration: 0.050)
+        #expect(controller.desiredBatchCount == stable)
+        let beforeOverlong = controller.desiredBatchCount
+        _ = controller.observe(metalDuration: 1.0)
+        #expect(controller.desiredBatchCount == max(beforeOverlong / 2, 1))
+        for _ in 0..<20 { _ = controller.observe(metalDuration: 0) }
+        #expect(controller.desiredBatchCount == 32)
+    }
+
+    @Test func fusedTimingIsAllocatedOnceIncludingPartialTail() {
+        let allocated = LombScargleWorker.allocatedDurations(
+            total: 0.046, frequencyCounts: [10, 10, 3]
+        )
+        #expect(allocated.count == 3)
+        #expect(abs(allocated.reduce(0, +) - 0.046) < 1e-15)
+        #expect(abs(allocated[0] - 0.020) < 1e-15)
+        #expect(abs(allocated[1] - 0.020) < 1e-15)
+        #expect(abs(allocated[2] - 0.006) < 1e-15)
+    }
+
+    @Test func cancellationUsesNoPenaltyFailureClassification() {
+        #expect(classifyWorkFailure(CancellationError()) == .environmentUnavailable)
+        #expect(classifyWorkFailure(WorkloadCancellation()) == .environmentUnavailable)
+        #expect(classifyWorkFailure(CancellationError()) != .unknown)
+        #expect(classifyWorkFailure(CancellationError()) != .execution)
+    }
+
+    @Test func partialBatchKeepsCompletedSiblingAndAccountsForEveryClaim() async throws {
+        let router = try WorkloadRouter(handlers: [PartialBatchHandler()])
+        let units = (0..<3).map { _ in
+            WorkUnit(
+                id: UUID(), projectID: "p", workloadID: "batch", datasetID: nil,
+                payload: nil, frequencyStartIndex: nil, startFrequency: nil,
+                frequencyStep: nil, frequencyCount: nil
+            )
+        }
+        let members = try await router.executeBatch(workUnits: units, datasetData: nil)
+        #expect(members.map(\.workUnit.id) == units.map(\.id))
+        #expect(members.count == units.count)
+        if case .success = members[0].result {} else {
+            Issue.record("completed sibling was poisoned")
+        }
+        for member in members.dropFirst() {
+            do {
+                _ = try member.result.get()
+                Issue.record("unexecuted child unexpectedly completed")
+            } catch {
+                #expect(classifyWorkFailure(error) == .environmentUnavailable)
+            }
+        }
+    }
+
+    @Test func nonBatchingHandlerForcesSingleUnitClaims() throws {
+        let batchOnly = try WorkloadRouter(handlers: [PartialBatchHandler()])
+        #expect(batchOnly.desiredBatchCount == 16)
+        let mixed = try WorkloadRouter(handlers: [
+            PartialBatchHandler(), StubHandler(workloadID: "single")
+        ])
+        #expect(mixed.desiredBatchCount == 1)
+    }
+
+    @Test func lombScargleGroupingOnlyFusesExactContiguousCoverage() {
+        let units = [0, 10, 30, 20].map { start in
+            scopedWorkUnit(
+                projectID: "p", datasetID: "d",
+                payload: .object([
+                    "frequencyStartIndex": .number(Double(start)),
+                    "startFrequency": .number(1 + Double(start) * 0.1),
+                    "frequencyStep": .number(0.1),
+                    "frequencyCount": .number(10)
+                ])
+            )
+        }
+        let groups = LombScargleWorker.contiguousGroups(units)
+        #expect(groups.count == 1)
+        #expect(groups[0].units.count == 4)
+        let indices = groups[0].payloads.flatMap {
+            Array($0.frequencyStartIndex..<($0.frequencyStartIndex + $0.frequencyCount))
+        }
+        #expect(indices == Array(0..<40))
+
+        let gap = LombScargleWorker.contiguousGroups([units[0], units[2]])
+        #expect(gap.count == 2)
+        let overlap = LombScargleWorker.contiguousGroups([units[0], units[0]])
+        #expect(overlap.count == 2)
+    }
+
+    @Test func coordinatorBatchClaimDecodesObjectArrayAndEmpty() async throws {
+        let id = UUID()
+        let object = Self.workData(id: id)
+        let objectRecorder = RequestRecorder { _ in (object, 200) }
+        let objectClient = coordinatorClient(recorder: objectRecorder)
+        #expect(try await objectClient.claimWork(nodeID: UUID(), maxWorkUnits: 8).map(\.id) == [id])
+        let request = try JSONDecoder().decode(
+            WorkClaimRequest.self, from: try #require(objectRecorder.bodies.first)
+        )
+        #expect(request.maxWorkUnits == 8)
+
+        let arrayClient = coordinatorClient(recorder: RequestRecorder { _ in
+            (Data("[\(String(decoding: object, as: UTF8.self))]".utf8), 200)
+        })
+        #expect(try await arrayClient.claimWork(nodeID: UUID(), maxWorkUnits: 32).count == 1)
+
+        let emptyClient = coordinatorClient(recorder: RequestRecorder { _ in
+            (Data(), 204)
+        })
+        #expect(try await emptyClient.claimWork(nodeID: UUID(), maxWorkUnits: 4).isEmpty)
+    }
+
     @Test func integerJSONConversionRejectsOutOfRangeNumbers() {
         #expect(JSONValue.number(4).intValue == 4)
         #expect(JSONValue.number(4.5).intValue == nil)
@@ -909,6 +1026,7 @@ private final class RequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private let response: (URLRequest) -> (Data, Int)
     private var recordedPaths: [String] = []
+    private var recordedBodies: [Data] = []
 
     init(response: @escaping (URLRequest) -> (Data, Int)) {
         self.response = response
@@ -918,8 +1036,13 @@ private final class RequestRecorder: @unchecked Sendable {
         lock.withLock { recordedPaths }
     }
 
+    var bodies: [Data] {
+        lock.withLock { recordedBodies }
+    }
+
     func handle(_ request: URLRequest) -> (Data, Int) {
         lock.withLock {
+            if let body = request.httpBody { recordedBodies.append(body) }
             recordedPaths.append(
                 URLComponents(
                     url: request.url!,
@@ -1011,5 +1134,38 @@ private struct StubHandler: OpenStarWorkloadHandler {
             summary: nil,
             legacyResultFields: .none
         )
+    }
+}
+
+private struct PartialBatchHandler: OpenStarBatchWorkloadHandler {
+    let workloadIDs = ["batch"]
+    let capabilities = [
+        WorkloadCapability(
+            workloadID: "batch", executionBackends: [.cpu], validatorID: nil
+        )
+    ]
+    let desiredBatchCount = 16
+
+    func execute(
+        workUnit: WorkUnit, datasetData: Data?
+    ) async throws -> WorkloadExecution {
+        WorkloadExecution(
+            duration: 0, payload: .string("complete"), summary: nil,
+            legacyResultFields: .none
+        )
+    }
+
+    func executeBatch(
+        workUnits: [WorkUnit], datasetData: Data?
+    ) async throws -> [WorkloadBatchMember] {
+        guard let first = workUnits.first else { return [] }
+        return [
+            WorkloadBatchMember(
+                workUnit: first,
+                result: .success(try await execute(
+                    workUnit: first, datasetData: datasetData
+                ))
+            )
+        ]
     }
 }
