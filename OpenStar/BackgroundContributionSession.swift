@@ -39,6 +39,7 @@ final class BackgroundContributionSession:
 
     private let scheduler: BGTaskScheduler
     private var registrationAttempted = false
+    private var launchHandler: ((BackgroundContributionTask) -> Void)?
     private var submittedIdentifier: String?
 
     init(scheduler: BGTaskScheduler = .shared) {
@@ -51,9 +52,19 @@ final class BackgroundContributionSession:
     ) -> Bool {
         guard !registrationAttempted else { return false }
         registrationAttempted = true
+        self.launchHandler = launchHandler
+        return true
+    }
 
-        return scheduler.register(
-            forTaskWithIdentifier: BackgroundContributionIdentifiers.permitted,
+    func submit() throws -> String? {
+        guard BGTaskScheduler.supportedResources.contains(.gpu),
+              let launchHandler else {
+            return nil
+        }
+
+        let identifier = BackgroundContributionIdentifiers.session(UUID())
+        let registered = scheduler.register(
+            forTaskWithIdentifier: identifier,
             using: nil
         ) { task in
             guard let task = task as? BGContinuedProcessingTask else {
@@ -65,14 +76,11 @@ final class BackgroundContributionSession:
                 launchHandler(SystemBackgroundContributionTask(task: task))
             }
         }
-    }
 
-    func submit() throws -> String? {
-        guard BGTaskScheduler.supportedResources.contains(.gpu) else {
+        guard registered else {
             return nil
         }
 
-        let identifier = BackgroundContributionIdentifiers.session(UUID())
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,
             title: "Contributing to OpenStar",
