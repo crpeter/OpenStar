@@ -98,6 +98,94 @@ struct OpenStarTests {
         #expect(nonMaximum.reason.contains("is not a local maximum"))
     }
 
+    @Test func lombScargleBatchValidatorPreservesIndependentResultsAndGrids() throws {
+        let coordinates = (0..<40).map { Float($0) / 10 }
+        let values = coordinates.map { sin(2 * Float.pi * 0.5 * $0) }
+        let valuesDouble = values.map(Double.init)
+        let dataset = LombScargleValidationDataset(
+            coordinates: coordinates.map(Double.init), values: valuesDouble,
+            totalValueSquared: valuesDouble.reduce(0) { $0 + $1 * $1 }
+        )
+        let grids: [(Float, Float, Int, Int)] = [
+            (0.4, 0.1, 3, 0), // beginning: only winner and winner + 1
+            (0.2, 0.15, 5, 2), // a distinct grid and both neighbors
+            (0.1, 0.2, 3, 2) // end: only winner - 1 and winner
+        ]
+        let requests = grids.map { start, step, count, winner in
+            LombScargleValidationRequest(
+                metalBestIndex: winner,
+                metalBestPower: referenceLombScarglePower(
+                    coordinates: coordinates, values: values,
+                    frequency: Double(start) + Double(winner) * Double(step)
+                ), startFrequency: start, frequencyStep: step,
+                frequencyCount: count
+            )
+        }
+        let singles = try requests.map { request in
+            try LombScargleCPUValidator.validate(
+                dataset: dataset, metalBestIndex: request.metalBestIndex,
+                metalBestPower: request.metalBestPower,
+                startFrequency: request.startFrequency,
+                frequencyStep: request.frequencyStep,
+                frequencyCount: request.frequencyCount
+            )
+        }
+        let batch = LombScargleCPUValidator.validateBatch(
+            dataset: dataset, requests: requests
+        )
+        let batched = try batch.map { try $0.get() }
+
+        for (single, grouped) in zip(singles, batched) {
+            #expect(single.passed == grouped.passed)
+            #expect(single.reason == grouped.reason)
+            #expect(single.metalBestIndex == grouped.metalBestIndex)
+            #expect(single.cpuBestLocalIndex == grouped.cpuBestLocalIndex)
+            #expect(single.metalBestPower == grouped.metalBestPower)
+            #expect(single.cpuPowerAtMetalWinner == grouped.cpuPowerAtMetalWinner)
+            #expect(single.absolutePowerError == grouped.absolutePowerError)
+            #expect(single.allowedPowerError == grouped.allowedPowerError)
+        }
+        #expect((0...1).contains(batched[0].cpuBestLocalIndex))
+        #expect((1...2).contains(batched[2].cpuBestLocalIndex))
+        #expect(batched.map(\.metalBestIndex) == [0, 2, 2])
+    }
+
+    @Test func lombScargleBatchValidatorIsolatesIntegrityFailures() throws {
+        let coordinates = (0..<40).map { Float($0) / 10 }
+        let values = coordinates.map { sin(2 * Float.pi * 0.5 * $0) }
+        let valuesDouble = values.map(Double.init)
+        let dataset = LombScargleValidationDataset(
+            coordinates: coordinates.map(Double.init), values: valuesDouble,
+            totalValueSquared: valuesDouble.reduce(0) { $0 + $1 * $1 }
+        )
+        let start: Float = 0.4
+        let step: Float = 0.1
+        let winnerPower = referenceLombScarglePower(
+            coordinates: coordinates, values: values, frequency: 0.5
+        )
+        let beginningPower = referenceLombScarglePower(
+            coordinates: coordinates, values: values,
+            frequency: Double(start)
+        )
+        let results = LombScargleCPUValidator.validateBatch(
+            dataset: dataset,
+            requests: [
+                .init(metalBestIndex: 1, metalBestPower: winnerPower,
+                      startFrequency: start, frequencyStep: step, frequencyCount: 3),
+                .init(metalBestIndex: 1, metalBestPower: winnerPower + 1,
+                      startFrequency: start, frequencyStep: step, frequencyCount: 3),
+                .init(metalBestIndex: 0, metalBestPower: beginningPower,
+                      startFrequency: start, frequencyStep: step, frequencyCount: 3)
+            ]
+        )
+        let validations = try results.map { try $0.get() }
+        #expect(validations[0].passed)
+        #expect(!validations[1].passed)
+        #expect(validations[1].reason.contains("GPU power"))
+        #expect(!validations[2].passed)
+        #expect(validations[2].reason.contains("is not a local maximum"))
+    }
+
     @Test func adaptiveBatchControllerLearnsWithHysteresisAndBounds() {
         let controller = AdaptiveBatchController()
         #expect(controller.desiredBatchCount == 1)
@@ -113,6 +201,14 @@ struct OpenStarTests {
         #expect(controller.desiredBatchCount == max(beforeOverlong / 2, 1))
         for _ in 0..<20 { _ = controller.observe(metalDuration: 0) }
         #expect(controller.desiredBatchCount == 128)
+    }
+
+    @Test func durationAllocationPreservesMeasuredValidationTotalExactly() {
+        let measured = 0.017_123_456_789
+        let allocated = LombScargleWorker.allocatedDurations(
+            total: measured, frequencyCounts: [3, 9, 2, 17]
+        )
+        #expect(allocated.reduce(0, +) == measured)
     }
 
     @Test func adaptiveBatchControllerHoldsAtA19TargetObservation() {
@@ -735,6 +831,9 @@ struct OpenStarTests {
         let childPreparation = payloads.compactMap {
             $0["datasetPreparationDurationSeconds"]?.doubleValue
         }
+        let childValidation = payloads.compactMap {
+            $0["validation"]?.objectValue?["durationSeconds"]?.doubleValue
+        }
         let fusedMetal = try #require(
             payloads.first?["fusedDispatchMetalDurationSeconds"]?.doubleValue
         )
@@ -747,6 +846,11 @@ struct OpenStarTests {
         #expect(abs(childMetal.reduce(0, +) - fusedMetal) < 1e-12)
         #expect(abs(executions.map(\.duration).reduce(0, +) - fusedTotal) < 1e-12)
         #expect(abs(childPreparation.reduce(0, +) - fusedPreparation) < 1e-12)
+        // Validation is measured once and allocated, so no child can contain
+        // the whole shared interval in addition to its siblings.
+        #expect(childValidation.count == counts.count)
+        #expect(childValidation.allSatisfy { $0 >= 0 })
+        #expect(childValidation.reduce(0, +) <= fusedTotal)
         #expect(childMetal[2] < childMetal[0])
         #expect(executions[2].duration < executions[0].duration)
     }
