@@ -81,6 +81,15 @@ struct WorkloadCancellation: LocalizedError, WorkFailureClassifyingError {
 }
 
 nonisolated
+struct WorkloadDataUnavailable: LocalizedError, WorkFailureClassifyingError {
+    let underlying: any Error
+    var errorDescription: String? {
+        "Dataset acquisition failed: \(underlying.localizedDescription)"
+    }
+    var workFailureKind: WorkFailureKind { .transportUnavailable }
+}
+
+nonisolated
 enum WorkloadRouterError: LocalizedError, WorkFailureClassifyingError {
     case unsupportedWorkload(String)
     case duplicateWorkload(String)

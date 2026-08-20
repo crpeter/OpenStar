@@ -351,9 +351,13 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         for group in Self.contiguousGroups(workUnits) {
             do {
                 try Task.checkCancellation()
+                let groupStarted = ProcessInfo.processInfo.systemUptime
+                let preparationStarted = groupStarted
                 let dataset = try preparedDataset(
                     workUnit: group.units[0], data: datasetData
                 )
+                let preparationDuration = ProcessInfo.processInfo.systemUptime
+                    - preparationStarted
                 let combined = LombScargleWorkPayload(
                     frequencyStartIndex: group.payloads[0].frequencyStartIndex,
                     startFrequency: group.payloads[0].startFrequency,
@@ -375,6 +379,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                     total: metal.duration,
                     frequencyCounts: group.payloads.map(\.frequencyCount)
                 )
+                var validated: [UUID: ValidatedResult] = [:]
                 for ((unit, payload), childMetalDuration) in zip(
                     zip(group.units, group.payloads), childMetalDurations
                 ) {
@@ -384,15 +389,35 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                             powers: slice, payload: payload,
                             metalDuration: childMetalDuration
                         )
-                        let execution = try makeExecution(
-                            numerical: numerical, payload: payload,
-                            dataset: dataset
+                        validated[unit.id] = try validate(
+                            numerical: numerical, payload: payload, dataset: dataset
                         )
-                        outcomes[unit.id] = .success(execution)
                     } catch {
                         outcomes[unit.id] = .failure(error)
                     }
                     offset += payload.frequencyCount
+                }
+                let groupDuration = ProcessInfo.processInfo.systemUptime - groupStarted
+                let counts = group.payloads.map(\.frequencyCount)
+                let childTotalDurations = Self.allocatedDurations(
+                    total: groupDuration, frequencyCounts: counts
+                )
+                let childPreparationDurations = Self.allocatedDurations(
+                    total: preparationDuration, frequencyCounts: counts
+                )
+                for (((unit, payload), totalDuration), childPreparation) in zip(
+                    zip(zip(group.units, group.payloads), childTotalDurations),
+                    childPreparationDurations
+                ) {
+                    guard let result = validated[unit.id] else { continue }
+                    outcomes[unit.id] = .success(makeExecution(
+                        validated: result, payload: payload,
+                        totalDuration: totalDuration,
+                        preparationDuration: childPreparation,
+                        fusedMetalDuration: metal.duration,
+                        fusedGroupDuration: groupDuration,
+                        fusedPreparationDuration: preparationDuration
+                    ))
                 }
             } catch is CancellationError {
                 // Preserve outcomes from earlier groups. This group and every
@@ -573,6 +598,12 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         let bestPower: Double
     }
 
+    private struct ValidatedResult {
+        let numerical: NumericalResult
+        let validation: LombScargleValidation
+        let validationDuration: Double
+    }
+
     private func preparedDataset(
         workUnit: WorkUnit,
         data: Data
@@ -681,11 +712,11 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         )
     }
 
-    private func makeExecution(
+    private func validate(
         numerical: NumericalResult,
         payload: LombScargleWorkPayload,
         dataset: PreparedDataset
-    ) throws -> WorkloadExecution {
+    ) throws -> ValidatedResult {
         let started = ProcessInfo.processInfo.systemUptime
         let validation = try LombScargleCPUValidator.validate(
             coordinates: dataset.coordinates, values: dataset.values,
@@ -698,8 +729,24 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         guard validation.passed else {
             throw LombScargleError.validationFailed(validation)
         }
-        let duration = ProcessInfo.processInfo.systemUptime - started
-            + numerical.metalDuration
+        return ValidatedResult(
+            numerical: numerical,
+            validation: validation,
+            validationDuration: ProcessInfo.processInfo.systemUptime - started
+        )
+    }
+
+    private func makeExecution(
+        validated: ValidatedResult,
+        payload: LombScargleWorkPayload,
+        totalDuration: Double,
+        preparationDuration: Double,
+        fusedMetalDuration: Double,
+        fusedGroupDuration: Double,
+        fusedPreparationDuration: Double
+    ) -> WorkloadExecution {
+        let numerical = validated.numerical
+        let validation = validated.validation
         let result: JSONValue = .object([
             "bestFrequency": .number(numerical.bestFrequency),
             "bestPeriodDays": .number(numerical.reciprocalFrequency),
@@ -708,18 +755,25 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                 payload.frequencyStartIndex + numerical.bestIndex
             )),
             "metalDurationSeconds": .number(numerical.metalDuration),
-            "totalWorkloadDurationSeconds": .number(duration),
+            "datasetPreparationDurationSeconds": .number(preparationDuration),
+            "totalWorkloadDurationSeconds": .number(totalDuration),
+            "fusedDispatchMetalDurationSeconds": .number(fusedMetalDuration),
+            "fusedGroupWorkloadDurationSeconds": .number(fusedGroupDuration),
+            "fusedDatasetPreparationDurationSeconds": .number(
+                fusedPreparationDuration
+            ),
             "validation": .object([
                 "validatorID": .string(LombScargleValidation.validatorID),
                 "passed": .bool(true),
                 "cpuBestLocalIndex": .number(Double(validation.cpuBestLocalIndex)),
                 "cpuPowerAtMetalWinner": .number(validation.cpuPowerAtMetalWinner),
                 "absolutePowerError": .number(validation.absolutePowerError),
-                "allowedPowerError": .number(validation.allowedPowerError)
+                "allowedPowerError": .number(validation.allowedPowerError),
+                "durationSeconds": .number(validated.validationDuration)
             ])
         ])
         return WorkloadExecution(
-            duration: duration, payload: result,
+            duration: totalDuration, payload: result,
             summary: WorkloadResultSummary(
                 title: "Lomb-Scargle Result",
                 fields: [

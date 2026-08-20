@@ -32,6 +32,16 @@ struct OpenStarTests {
         #expect(abs(allocated[0] - 0.020) < 1e-15)
         #expect(abs(allocated[1] - 0.020) < 1e-15)
         #expect(abs(allocated[2] - 0.006) < 1e-15)
+
+        let totalDurations = LombScargleWorker.allocatedDurations(
+            total: 0.092, frequencyCounts: [10, 10, 3]
+        )
+        let preparationDurations = LombScargleWorker.allocatedDurations(
+            total: 0.023, frequencyCounts: [10, 10, 3]
+        )
+        #expect(abs(totalDurations.reduce(0, +) - 0.092) < 1e-15)
+        #expect(abs(preparationDurations.reduce(0, +) - 0.023) < 1e-15)
+        #expect(abs(preparationDurations[2] - 0.003) < 1e-15)
     }
 
     @Test func cancellationUsesNoPenaltyFailureClassification() {
@@ -99,6 +109,25 @@ struct OpenStarTests {
         #expect(gap.count == 2)
         let overlap = LombScargleWorker.contiguousGroups([units[0], units[0]])
         #expect(overlap.count == 2)
+
+        let roundedStart = scopedWorkUnit(
+            projectID: "p", datasetID: "d",
+            payload: .object([
+                "frequencyStartIndex": .number(10),
+                "startFrequency": .number(Double(Float(1.0) + 10 * Float(0.1))),
+                "frequencyStep": .number(0.1), "frequencyCount": .number(10)
+            ])
+        )
+        #expect(LombScargleWorker.contiguousGroups([units[0], roundedStart]).count == 1)
+
+        let mismatchedStep = scopedWorkUnit(
+            projectID: "p", datasetID: "d",
+            payload: .object([
+                "frequencyStartIndex": .number(10), "startFrequency": .number(2),
+                "frequencyStep": .number(0.11), "frequencyCount": .number(10)
+            ])
+        )
+        #expect(LombScargleWorker.contiguousGroups([units[0], mismatchedStep]).count == 2)
     }
 
     @Test func coordinatorBatchClaimDecodesObjectArrayAndEmpty() async throws {
@@ -386,6 +415,52 @@ struct OpenStarTests {
         #expect(rebuilt.totalValueSquared == initial.totalValueSquared)
         #expect(rebuilt.count == 2)
         #expect(rebuilt.preparations == 4)
+    }
+
+    @Test func fusedBatchReportsSharedTimingExactlyOnceAcrossChildren() async throws {
+        let worker = try LombScargleWorker()
+        let data = Data(
+            #"{"coordinates":[0,1,2,3,4,5],"values":[0,1,0,-1,0,1]}"#.utf8
+        )
+        var startIndex = 0
+        let counts = [10, 10, 3]
+        let units = counts.map { count -> WorkUnit in
+            defer { startIndex += count }
+            return scopedWorkUnit(
+                projectID: "timing", datasetID: "shared",
+                payload: .object([
+                    "frequencyStartIndex": .number(Double(startIndex)),
+                    "startFrequency": .number(0.05 + Double(startIndex) * 0.01),
+                    "frequencyStep": .number(0.01),
+                    "frequencyCount": .number(Double(count))
+                ])
+            )
+        }
+        let members = try await worker.executeBatch(
+            workUnits: units, datasetData: data
+        )
+        let executions = try members.map { try $0.result.get() }
+        let payloads = try executions.map { try #require($0.payload.objectValue) }
+        let childMetal = payloads.compactMap {
+            $0["metalDurationSeconds"]?.doubleValue
+        }
+        let childPreparation = payloads.compactMap {
+            $0["datasetPreparationDurationSeconds"]?.doubleValue
+        }
+        let fusedMetal = try #require(
+            payloads.first?["fusedDispatchMetalDurationSeconds"]?.doubleValue
+        )
+        let fusedTotal = try #require(
+            payloads.first?["fusedGroupWorkloadDurationSeconds"]?.doubleValue
+        )
+        let fusedPreparation = try #require(
+            payloads.first?["fusedDatasetPreparationDurationSeconds"]?.doubleValue
+        )
+        #expect(abs(childMetal.reduce(0, +) - fusedMetal) < 1e-12)
+        #expect(abs(executions.map(\.duration).reduce(0, +) - fusedTotal) < 1e-12)
+        #expect(abs(childPreparation.reduce(0, +) - fusedPreparation) < 1e-12)
+        #expect(childMetal[2] < childMetal[0])
+        #expect(executions[2].duration < executions[0].duration)
     }
 
     @Test func lombScargleRejectsZeroNormalizationDataset() async throws {
@@ -802,6 +877,86 @@ struct OpenStarTests {
             !paths[(firstResult + 1)..<nextClaim]
                 .contains(where: { $0.hasSuffix("/status") })
         )
+    }
+
+    @MainActor
+    @Test func datasetFailureAfterBatchClaimAccountsForEveryChild() async throws {
+        let ids = (0..<3).map { _ in UUID() }
+        let claims = LockedCounter()
+        let batch = Data(("[" + ids.map {
+            "{\"id\":\"\($0.uuidString)\",\"projectID\":\"project\","
+                + "\"workloadID\":\"batch\",\"datasetID\":\"missing\"}"
+        }.joined(separator: ",") + "]").utf8)
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            case ("POST", "/v1/work/claim"):
+                return claims.increment() == 1 ? (batch, 200) : (Data(), 204)
+            case ("GET", let path?) where path.hasSuffix("/datasets/missing"):
+                return (Data("unavailable".utf8), 503)
+            case ("POST", let path?) where path.hasSuffix("/result"):
+                return (Data(#"{"accepted":true,"message":"recorded"}"#.utf8), 200)
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(handlers: [PartialBatchHandler()]),
+            projectStatusRefreshInterval: .seconds(60)
+        )
+        manager.start()
+        defer { manager.stop() }
+        try await waitUntil { manager.unitsAccepted == ids.count }
+
+        let results = recorder.bodies.compactMap {
+            try? JSONDecoder().decode(WorkResult.self, from: $0)
+        }
+        #expect(Set(results.map(\.workUnitID)) == Set(ids))
+        #expect(results.allSatisfy { $0.failureKind == .transportUnavailable })
+    }
+
+    @MainActor
+    @Test func failedChildSubmissionDoesNotSuppressLaterSiblings() async throws {
+        let ids = (0..<3).map { _ in UUID() }
+        let claims = LockedCounter()
+        let batch = Data(("[" + ids.map {
+            "{\"id\":\"\($0.uuidString)\",\"projectID\":\"project\","
+                + "\"workloadID\":\"batch\"}"
+        }.joined(separator: ",") + "]").utf8)
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            case ("POST", "/v1/work/claim"):
+                return claims.increment() == 1 ? (batch, 200) : (Data(), 204)
+            case ("POST", let path?) where path.contains(ids[0].uuidString):
+                return (Data("rejected".utf8), 400)
+            case ("POST", let path?) where path.hasSuffix("/result"):
+                return (Data(#"{"accepted":true,"message":"recorded"}"#.utf8), 200)
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(handlers: [PartialBatchHandler()]),
+            projectStatusRefreshInterval: .seconds(60)
+        )
+        manager.start()
+        defer { manager.stop() }
+        try await waitUntil {
+            recorder.paths.filter { $0.hasSuffix("/result") }.count == ids.count
+        }
+        let resultPaths = recorder.paths.filter { $0.hasSuffix("/result") }
+        #expect(ids.allSatisfy { id in
+            resultPaths.contains { $0.contains(id.uuidString) }
+        })
     }
 
     @MainActor

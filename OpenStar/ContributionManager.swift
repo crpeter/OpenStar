@@ -210,16 +210,21 @@ final class ContributionManager {
                     currentWorkloadID = first.workloadID
                     currentWorkUnitID = first.id
 
-                    let data: Data?
-                    if let datasetID = first.datasetID {
-                        data = try await datasetData(
-                            projectID: first.projectID, datasetID: datasetID
-                        )
-                    } else { data = nil }
-
                     availability = WorkerEnvironment.currentAvailability()
                     let members: [WorkloadBatchMember]
                     do {
+                        let data: Data?
+                        if let datasetID = first.datasetID {
+                            do {
+                                data = try await datasetData(
+                                    projectID: first.projectID, datasetID: datasetID
+                                )
+                            } catch is CancellationError {
+                                throw WorkloadCancellation()
+                            } catch {
+                                throw WorkloadDataUnavailable(underlying: error)
+                            }
+                        } else { data = nil }
                         try WorkerEnvironment.requireAvailable()
                         members = try await workloadRouter.executeBatch(
                             workUnits: claimed, datasetData: data
@@ -230,12 +235,17 @@ final class ContributionManager {
                         members = claimed.map {
                             .init(workUnit: $0, result: .failure(WorkloadCancellation()))
                         }
+                    } catch is WorkloadCancellation {
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(WorkloadCancellation()))
+                        }
                     } catch {
                         members = claimed.map {
                             .init(workUnit: $0, result: .failure(error))
                         }
                     }
 
+                    var firstSubmissionError: (any Error)?
                     for member in members {
                         currentWorkUnitID = member.workUnit.id
                         let result: WorkResult
@@ -266,15 +276,20 @@ final class ContributionManager {
                             )
                         }
                         isSubmitting = true
-                        let receipt = try await submitWithRetry(result: result)
-                        isSubmitting = false
-                        if receipt.accepted {
-                            unitsAccepted += 1
-                            backgroundTask?.recordAcceptedWork(
-                                unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
-                            )
+                        do {
+                            let receipt = try await submitWithRetry(result: result)
+                            if receipt.accepted {
+                                unitsAccepted += 1
+                                backgroundTask?.recordAcceptedWork(
+                                    unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
+                                )
+                            }
+                        } catch {
+                            if firstSubmissionError == nil { firstSubmissionError = error }
                         }
+                        isSubmitting = false
                     }
+                    if let firstSubmissionError { throw firstSubmissionError }
                     currentWorkUnitID = nil
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
