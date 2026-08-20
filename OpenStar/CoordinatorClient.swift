@@ -76,7 +76,7 @@ final class CoordinatorClient: @unchecked Sendable {
         request.httpBody = try JSONEncoder().encode(
             WorkClaimRequest(
                 nodeID: nodeID,
-                maxWorkUnits: maxWorkUnits > 1 ? min(maxWorkUnits, 32) : nil
+                maxWorkUnits: maxWorkUnits > 1 ? min(maxWorkUnits, 128) : nil
             )
         )
 

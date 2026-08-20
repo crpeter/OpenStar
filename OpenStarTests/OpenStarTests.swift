@@ -20,7 +20,7 @@ struct OpenStarTests {
         _ = controller.observe(metalDuration: 1.0)
         #expect(controller.desiredBatchCount == max(beforeOverlong / 2, 1))
         for _ in 0..<20 { _ = controller.observe(metalDuration: 0) }
-        #expect(controller.desiredBatchCount == 32)
+        #expect(controller.desiredBatchCount == 128)
     }
 
     @Test func adaptiveBatchControllerHoldsAtA19TargetObservation() {
@@ -260,8 +260,8 @@ struct OpenStarTests {
             )
         }
         let groups = LombScargleWorker.contiguousGroups(units)
-        #expect(groups.count == 32)
-        #expect(groups.allSatisfy { $0.units.count == 32 })
+        #expect(groups.count == 8)
+        #expect(groups.allSatisfy { $0.units.count == 128 })
     }
 
     @Test func fusedFrequenciesPreserveEachChildFloatStart() throws {

@@ -134,7 +134,7 @@ final class WorkloadRouter: @unchecked Sendable {
         }
         return handlers.compactMap {
             ($0 as? any OpenStarBatchWorkloadHandler)?.desiredBatchCount
-        }.map { min(max($0, 1), 32) }.min() ?? 1
+        }.map { min(max($0, 1), 128) }.min() ?? 1
     }
 
     convenience init() throws {
