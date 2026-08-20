@@ -241,6 +241,10 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         let coordinates: [Float]
         let values: [Float]
         let totalValueSquared: Float
+        let coordinatesDouble: [Double]
+        let valuesDouble: [Double]
+        let totalValueSquaredDouble: Double
+        let validationDataset: LombScargleValidationDataset
         let coordinateBuffer: MTLBuffer
         let valueBuffer: MTLBuffer
 
@@ -248,12 +252,17 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             coordinates: [Float],
             values: [Float],
             totalValueSquared: Float,
+            validationDataset: LombScargleValidationDataset,
             coordinateBuffer: MTLBuffer,
             valueBuffer: MTLBuffer
         ) {
             self.coordinates = coordinates
             self.values = values
             self.totalValueSquared = totalValueSquared
+            self.coordinatesDouble = validationDataset.coordinates
+            self.valuesDouble = validationDataset.values
+            self.totalValueSquaredDouble = validationDataset.totalValueSquared
+            self.validationDataset = validationDataset
             self.coordinateBuffer = coordinateBuffer
             self.valueBuffer = valueBuffer
         }
@@ -302,6 +311,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             coordinateBuffer: ObjectIdentifier?,
             valueBuffer: ObjectIdentifier?,
             totalValueSquared: Float?,
+            validationDataset: ObjectIdentifier?,
             count: Int,
             preparations: Int
         ) {
@@ -312,6 +322,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                 value.map { ObjectIdentifier($0.coordinateBuffer as AnyObject) },
                 value.map { ObjectIdentifier($0.valueBuffer as AnyObject) },
                 value?.totalValueSquared,
+                value.map { ObjectIdentifier($0.validationDataset) },
                 values.count,
                 preparationCount
             )
@@ -667,6 +678,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         coordinateBuffer: ObjectIdentifier?,
         valueBuffer: ObjectIdentifier?,
         totalValueSquared: Float?,
+        validationDataset: ObjectIdentifier?,
         count: Int,
         preparations: Int
     ) {
@@ -708,6 +720,17 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             throw LombScargleError.invalidDataset
         }
 
+        let coordinatesDouble = dataset.coordinates.map(Double.init)
+        let valuesDouble = dataset.values.map(Double.init)
+        let totalValueSquaredDouble = valuesDouble.reduce(0) {
+            $0 + $1 * $1
+        }
+        let validationDataset = LombScargleValidationDataset(
+            coordinates: coordinatesDouble,
+            values: valuesDouble,
+            totalValueSquared: totalValueSquaredDouble
+        )
+
         let byteCount = dataset.coordinates.count * MemoryLayout<Float>.stride
         guard let coordinateBuffer = device.makeBuffer(
             bytes: dataset.coordinates,
@@ -725,6 +748,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             coordinates: dataset.coordinates,
             values: dataset.values,
             totalValueSquared: totalValueSquared,
+            validationDataset: validationDataset,
             coordinateBuffer: coordinateBuffer,
             valueBuffer: valueBuffer
         )
@@ -758,7 +782,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
     ) throws -> ValidatedResult {
         let started = ProcessInfo.processInfo.systemUptime
         let validation = try LombScargleCPUValidator.validate(
-            coordinates: dataset.coordinates, values: dataset.values,
+            dataset: dataset.validationDataset,
             metalBestIndex: numerical.bestIndex,
             metalBestPower: numerical.bestPower,
             startFrequency: payload.startFrequency,
