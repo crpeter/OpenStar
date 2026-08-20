@@ -31,6 +31,23 @@ struct OpenStarTests {
         #expect(controller.desiredBatchCount == 16)
     }
 
+    @Test func adaptiveBatchControllerTargetBandIgnoresStaleSlowEWMA() {
+        let controller = AdaptiveBatchController()
+        for _ in 0..<5 { _ = controller.observe(metalDuration: 0) }
+        #expect(controller.desiredBatchCount == 32)
+
+        #expect(controller.observe(metalDuration: 0.080) == 16)
+        #expect(controller.observe(metalDuration: 0.049) == 16)
+
+        var observations = 0
+        while controller.desiredBatchCount == 16, observations < 20 {
+            _ = controller.observe(metalDuration: 0.010)
+            observations += 1
+        }
+        #expect(observations > 1)
+        #expect(controller.desiredBatchCount == 32)
+    }
+
     @Test func fusedTimingIsAllocatedOnceIncludingPartialTail() {
         let allocated = LombScargleWorker.allocatedDurations(
             total: 0.046, frequencyCounts: [10, 10, 3]

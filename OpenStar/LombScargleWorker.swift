@@ -87,12 +87,10 @@ final class AdaptiveBatchController: @unchecked Sendable {
                 ?? metalDuration
             smoothedDuration = smoothed
             // A deliberately wide hysteresis band around the 40--50 ms goal.
-            // A raw dispatch already in the target band must not be hidden by
-            // EWMA lag and cause an intentional overshoot.
-            if metalDuration < 0.035, smoothed < 0.035 {
-                count = min(count * 2, 32)
-            }
-            else if smoothed > 0.060 { count = max(count / 2, 1) }
+            // Raw observations in the target band hold even when EWMA still
+            // reflects an earlier slow dispatch. Smoothing only gates growth.
+            if metalDuration >= 0.035 { return count }
+            if smoothed < 0.035 { count = min(count * 2, 32) }
             return count
         }
     }
