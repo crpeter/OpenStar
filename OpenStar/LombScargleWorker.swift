@@ -103,7 +103,7 @@ final class AdaptiveBatchController: @unchecked Sendable {
             // Raw observations in the target band hold even when EWMA still
             // reflects an earlier slow dispatch. Smoothing only gates growth.
             if metalDuration >= 0.035 { return count }
-            if smoothed < 0.035 { count = min(count * 2, 32) }
+            if smoothed < 0.035 { count = min(count * 2, 128) }
             return count
         }
     }
@@ -461,7 +461,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                priorUnit.projectID == item.0.projectID,
                priorUnit.datasetID == item.0.datasetID,
                priorUnit.workloadID == item.0.workloadID,
-               last.units.count < 32,
+               last.units.count < 128,
                prior.frequencyStartIndex + prior.frequencyCount == item.1.frequencyStartIndex,
                compatibleGrid(previous: prior, next: item.1) {
                 groups[groups.count - 1] = LombScargleBatchGroup(
@@ -817,7 +817,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         let frequencyCount = payloads.reduce(0) { $0 + $1.frequencyCount }
 
         guard sampleCount <= Int(UInt32.max),
-              !payloads.isEmpty, payloads.count <= 32,
+              !payloads.isEmpty, payloads.count <= 128,
               frequencyCount <= Int(UInt32.max),
               frequencyCount <= Int.max / MemoryLayout<Float>.stride,
               sampleCount <= Int.max / MemoryLayout<Float>.stride else {
