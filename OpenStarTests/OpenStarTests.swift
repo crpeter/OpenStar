@@ -441,6 +441,90 @@ struct OpenStarTests {
     }
 
     @MainActor
+    @Test func contributionStartRequestsBackgroundSupportOnlyOnce() async throws {
+        let background = StubBackgroundContributionSession()
+        let manager = ContributionManager(
+            coordinator: idleCoordinator(),
+            workloadRouter: try WorkloadRouter(handlers: []),
+            backgroundSession: background
+        )
+
+        manager.start()
+        manager.start()
+        #expect(background.submissions == 1)
+        manager.stop()
+    }
+
+    @MainActor
+    @Test func unavailableBackgroundSupportLeavesForegroundWorkerRunning() throws {
+        let background = StubBackgroundContributionSession(submitResult: false)
+        let manager = ContributionManager(
+            coordinator: idleCoordinator(),
+            workloadRouter: try WorkloadRouter(handlers: []),
+            backgroundSession: background
+        )
+
+        manager.start()
+        #expect(manager.isContributing)
+        #expect(background.submissions == 1)
+        manager.stop()
+    }
+
+    @MainActor
+    @Test func backgroundExpirationAndUserStopCleanUpTheSameWorker() throws {
+        let background = StubBackgroundContributionSession()
+        let manager = ContributionManager(
+            coordinator: idleCoordinator(),
+            workloadRouter: try WorkloadRouter(handlers: []),
+            backgroundSession: background
+        )
+        manager.start()
+        let firstTask = StubBackgroundContributionTask(
+            identifier: try #require(background.lastSubmittedIdentifier)
+        )
+        let firstIdentifier = firstTask.identifier
+        manager.attachBackgroundTask(firstTask)
+        firstTask.expirationHandler?()
+
+        #expect(!manager.isContributing)
+        #expect(background.cancellations == 1)
+        #expect(firstTask.completions == [false])
+
+        manager.start()
+        let secondTask = StubBackgroundContributionTask(
+            identifier: try #require(background.lastSubmittedIdentifier)
+        )
+        #expect(secondTask.identifier != firstIdentifier)
+        manager.attachBackgroundTask(secondTask)
+        manager.stop()
+
+        #expect(background.submissions == 2)
+        #expect(background.cancellations == 2)
+        #expect(secondTask.completions == [false])
+    }
+
+    @Test func backgroundIdentifiersMatchWildcardAndAreUnique() {
+        let first = BackgroundContributionIdentifiers.session(UUID())
+        let second = BackgroundContributionIdentifiers.session(UUID())
+
+        #expect(BackgroundContributionIdentifiers.permitted ==
+            "com.openstar.OpenStar.contribution.*")
+        #expect(first.hasPrefix("com.openstar.OpenStar.contribution."))
+        #expect(second.hasPrefix("com.openstar.OpenStar.contribution."))
+        #expect(first != second)
+    }
+
+    #if !os(iOS)
+    @MainActor
+    @Test func unsupportedPlatformUsesForegroundOnlyBackgroundSession() throws {
+        let session = BackgroundContributionSession()
+        #expect(!session.register { _ in })
+        #expect(try session.submit() == nil)
+        session.cancel()
+    }
+    #endif
+
+    @MainActor
     @Test func failedProjectStatusDoesNotPreventNextClaim() async throws {
         let workID = UUID()
         let workData = Data(
@@ -659,6 +743,21 @@ struct OpenStarTests {
         )
     }
 
+    private func idleCoordinator() -> CoordinatorClient {
+        coordinatorClient(recorder: RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("POST", "/v1/work/claim"):
+                return (Data(), 204)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            default:
+                return (Data(), 404)
+            }
+        })
+    }
+
     private func workUnit(
         workloadID: String = LombScargleWorker.workloadID,
         payload: JSONValue?,
@@ -693,6 +792,60 @@ struct OpenStarTests {
             frequencyStep: nil,
             frequencyCount: nil
         )
+    }
+}
+
+@MainActor
+private final class StubBackgroundContributionSession:
+    BackgroundContributionSessionSupporting {
+    private let submitResult: Bool
+    private(set) var registrations = 0
+    private(set) var submissions = 0
+    private(set) var cancellations = 0
+    private(set) var lastSubmittedIdentifier: String?
+
+    init(submitResult: Bool = true) {
+        self.submitResult = submitResult
+    }
+
+    func register(
+        launchHandler: @escaping (BackgroundContributionTask) -> Void
+    ) -> Bool {
+        registrations += 1
+        return registrations == 1
+    }
+
+    func submit() throws -> String? {
+        submissions += 1
+        guard submitResult else { return nil }
+        let identifier = BackgroundContributionIdentifiers.session(UUID())
+        lastSubmittedIdentifier = identifier
+        return identifier
+    }
+
+    func cancel() {
+        cancellations += 1
+    }
+}
+
+@MainActor
+private final class StubBackgroundContributionTask: BackgroundContributionTask {
+    let identifier: String
+    var expirationHandler: (() -> Void)?
+    private(set) var acceptedCounts: [Int] = []
+    private(set) var completions: [Bool] = []
+
+    init(identifier: String) {
+        self.identifier = identifier
+    }
+
+    func recordAcceptedWork(unitsAccepted: Int) {
+        acceptedCounts.append(unitsAccepted)
+    }
+
+    func complete(success: Bool) {
+        expirationHandler = nil
+        completions.append(success)
     }
 }
 
