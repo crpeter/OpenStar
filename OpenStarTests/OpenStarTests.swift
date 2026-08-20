@@ -1244,6 +1244,35 @@ struct OpenStarTests {
         try await Task.sleep(for: .milliseconds(50))
         #expect(recorder.paths.count == countAfterStop)
     }
+    
+    @Test func adaptiveBatchControllerWaitsBeforeRegrowingAfterShrink() {
+        let controller = AdaptiveBatchController()
+
+        for _ in 0..<7 {
+            _ = controller.observe(metalDuration: 0.005)
+        }
+        #expect(controller.desiredBatchCount == 128)
+
+        _ = controller.observe(metalDuration: 0.068)
+        #expect(controller.desiredBatchCount == 128)
+
+        _ = controller.observe(metalDuration: 0.069)
+        #expect(controller.desiredBatchCount == 64)
+
+        for _ in 0..<8 {
+            _ = controller.observe(metalDuration: 0.020)
+            #expect(controller.desiredBatchCount == 64)
+        }
+
+        for _ in 0..<10 {
+            _ = controller.observe(metalDuration: 0.020)
+            if controller.desiredBatchCount > 64 {
+                break
+            }
+        }
+
+        #expect(controller.desiredBatchCount == 128)
+    }
 
     @MainActor
     private func waitUntil(
