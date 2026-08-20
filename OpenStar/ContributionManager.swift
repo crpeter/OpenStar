@@ -10,6 +10,25 @@
 import Foundation
 import Observation
 
+nonisolated
+func classifyWorkFailure(_ error: Error) -> WorkFailureKind {
+    if error is CancellationError { return .environmentUnavailable }
+    if let classified = error as? any WorkFailureClassifyingError {
+        return classified.workFailureKind
+    }
+    if let urlError = error as? URLError {
+        switch urlError.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost,
+             .networkConnectionLost, .dnsLookupFailed, .notConnectedToInternet,
+             .internationalRoamingOff, .dataNotAllowed:
+            return .transportUnavailable
+        default: break
+        }
+    }
+    if (error as NSError).domain == NSURLErrorDomain { return .transportUnavailable }
+    return .unknown
+}
+
 @MainActor
 @Observable
 final class ContributionManager {
@@ -175,132 +194,105 @@ final class ContributionManager {
                         continue
                     }
 
-                    guard let workUnit = try await coordinator.claimWork(
-                        nodeID: nodeID
-                    ) else {
+                    let claimed = try await coordinator.claimWork(
+                        nodeID: nodeID,
+                        maxWorkUnits: workloadRouter.desiredBatchCount
+                    )
+                    guard let first = claimed.first else {
                         try await emptyClaimSleep(emptyClaimBackoff)
                         emptyClaimBackoff = min(
-                            emptyClaimBackoff * 2,
-                            maximumEmptyClaimBackoff
+                            emptyClaimBackoff * 2, maximumEmptyClaimBackoff
                         )
                         continue
                     }
-
-                    // A successful claim means work is flowing. Return to the
-                    // shortest poll delay for the next genuinely empty claim.
                     emptyClaimBackoff = initialEmptyClaimBackoff
+                    currentProject = first.projectID
+                    currentWorkloadID = first.workloadID
+                    currentWorkUnitID = first.id
 
-                    currentProject = workUnit.projectID
-                    currentWorkloadID = workUnit.workloadID
-                    currentWorkUnitID = workUnit.id
-
-                    print(
-                        "⭐️ [OpenStar] Claimed \(workUnit.id) · \(workUnit.workloadID)"
-                    )
-
-                    let result: WorkResult
-
+                    availability = WorkerEnvironment.currentAvailability()
+                    let members: [WorkloadBatchMember]
                     do {
-                        // Availability may change between claim and execution.
-                        // Returning environment-unavailable releases this lease
-                        // without penalizing the node.
-                        availability = WorkerEnvironment.currentAvailability()
-                        try WorkerEnvironment.requireAvailable()
-
                         let data: Data?
-
-                        if let datasetID = workUnit.datasetID {
-                            data = try await datasetData(
-                                projectID: workUnit.projectID,
-                                datasetID: datasetID
-                            )
-                        } else {
-                            data = nil
-                        }
-
-                        // Dataset download may race a foreground transition.
-                        availability = WorkerEnvironment.currentAvailability()
+                        if let datasetID = first.datasetID {
+                            do {
+                                data = try await datasetData(
+                                    projectID: first.projectID, datasetID: datasetID
+                                )
+                            } catch is CancellationError {
+                                throw WorkloadCancellation()
+                            } catch {
+                                throw WorkloadDataUnavailable(underlying: error)
+                            }
+                        } else { data = nil }
                         try WorkerEnvironment.requireAvailable()
-
-                        let execution = try await workloadRouter.execute(
-                            workUnit: workUnit,
-                            datasetData: data
+                        members = try await workloadRouter.executeBatch(
+                            workUnits: claimed, datasetData: data
                         )
-
-                        try Task.checkCancellation()
-
-                        unitsCompleted += 1
-                        totalComputeSeconds += execution.duration
-                        lastWorkUnitDuration = execution.duration
-                        lastResultSummary = execution.summary
-
-                        let legacy = execution.legacyResultFields
-
-                        result = WorkResult(
-                            workUnitID: workUnit.id,
-                            nodeID: nodeID,
-                            status: .completed,
-                            duration: execution.duration,
-                            payload: execution.payload,
-                            errorMessage: nil,
-                            failureKind: nil,
-                            bestFrequency: legacy.bestFrequency,
-                            bestPeriodDays: legacy.bestPeriodDays,
-                            bestPower: legacy.bestPower
-                        )
-
                     } catch is CancellationError {
-                        break
+                        // Cancellation releases every claimed lease without
+                        // reporting a node/workload execution failure.
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(WorkloadCancellation()))
+                        }
+                    } catch is WorkloadCancellation {
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(WorkloadCancellation()))
+                        }
                     } catch {
-                        let failureKind =
-                            classifyFailure(error)
-
-                        result = WorkResult(
-                            workUnitID: workUnit.id,
-                            nodeID: nodeID,
-                            status: .failed,
-                            duration: nil,
-                            payload: nil,
-                            errorMessage: error.localizedDescription,
-                            failureKind: failureKind,
-                            bestFrequency: nil,
-                            bestPeriodDays: nil,
-                            bestPower: nil
-                        )
-
-                        print(
-                            "⭐️ [OpenStar] Work unit failed "
-                            + "[\(failureKind.rawValue)]: "
-                            + error.localizedDescription
-                        )
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(error))
+                        }
                     }
 
-                    // A computed result must not be replaced by a failed result
-                    // merely because its first submission hit a transient
-                    // network error. Retry the exact same work-unit
-                    // result before this worker claims anything else.
-                    isSubmitting = true
-                    let receipt = try await submitWithRetry(
-                        result: result
-                    )
-                    isSubmitting = false
-
-                    if receipt.accepted {
-                        unitsAccepted += 1
-                        backgroundTask?.recordAcceptedWork(
-                            unitsAccepted:
-                                unitsAccepted - backgroundSessionInitialAcceptedCount
-                        )
+                    var firstSubmissionError: (any Error)?
+                    for member in members {
+                        currentWorkUnitID = member.workUnit.id
+                        let result: WorkResult
+                        switch member.result {
+                        case .success(let execution):
+                            unitsCompleted += 1
+                            totalComputeSeconds += execution.duration
+                            lastWorkUnitDuration = execution.duration
+                            lastResultSummary = execution.summary
+                            let legacy = execution.legacyResultFields
+                            result = WorkResult(
+                                workUnitID: member.workUnit.id, nodeID: nodeID,
+                                status: .completed, duration: execution.duration,
+                                payload: execution.payload, errorMessage: nil,
+                                failureKind: nil,
+                                bestFrequency: legacy.bestFrequency,
+                                bestPeriodDays: legacy.bestPeriodDays,
+                                bestPower: legacy.bestPower
+                            )
+                        case .failure(let error):
+                            result = WorkResult(
+                                workUnitID: member.workUnit.id, nodeID: nodeID,
+                                status: .failed, duration: nil, payload: nil,
+                                errorMessage: error.localizedDescription,
+                                failureKind: classifyFailure(error),
+                                bestFrequency: nil, bestPeriodDays: nil,
+                                bestPower: nil
+                            )
+                        }
+                        isSubmitting = true
+                        do {
+                            let receipt = try await submitWithRetry(result: result)
+                            if receipt.accepted {
+                                unitsAccepted += 1
+                                backgroundTask?.recordAcceptedWork(
+                                    unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
+                                )
+                            }
+                        } catch {
+                            if firstSubmissionError == nil { firstSubmissionError = error }
+                        }
+                        isSubmitting = false
                     }
-
-                    print(
-                        "⭐️ [OpenStar] Server response: \(receipt.message)"
-                    )
-
+                    if let firstSubmissionError { throw firstSubmissionError }
                     currentWorkUnitID = nil
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
-
                     await Task.yield()
                 }
             } catch is CancellationError {
@@ -411,35 +403,7 @@ final class ContributionManager {
     private func classifyFailure(
         _ error: Error
     ) -> WorkFailureKind {
-        if let classified =
-            error as? any WorkFailureClassifyingError {
-            return classified.workFailureKind
-        }
-
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .timedOut,
-                 .cannotFindHost,
-                 .cannotConnectToHost,
-                 .networkConnectionLost,
-                 .dnsLookupFailed,
-                 .notConnectedToInternet,
-                 .internationalRoamingOff,
-                 .dataNotAllowed:
-                return .transportUnavailable
-
-            default:
-                break
-            }
-        }
-
-        let nsError = error as NSError
-
-        if nsError.domain == NSURLErrorDomain {
-            return .transportUnavailable
-        }
-
-        return .unknown
+        classifyWorkFailure(error)
     }
 
     private func submitWithRetry(
@@ -447,32 +411,34 @@ final class ContributionManager {
         maximumAttempts: Int = 3
     ) async throws -> ResultReceipt {
         precondition(maximumAttempts > 0)
-
-        var attempt = 1
-
-        while true {
-            do {
-                return try await coordinator.submit(
-                    result: result
-                )
-            } catch {
-                guard attempt < maximumAttempts,
-                      isRetryableCoordinatorError(error) else {
-                    throw error
+        let coordinator = coordinator
+        // Submission is intentionally unstructured: cancellation stops heavy
+        // compute, but must not prevent completed/no-penalty child outcomes
+        // from releasing every lease already claimed by this worker.
+        return try await Task.detached {
+            var attempt = 1
+            while true {
+                do {
+                    return try await coordinator.submit(result: result)
+                } catch {
+                    let retryable: Bool
+                    if classifyWorkFailure(error) == .transportUnavailable {
+                        retryable = true
+                    } else if let coordinatorError = error as? CoordinatorClientError,
+                              case .serverError(let statusCode, _) = coordinatorError {
+                        retryable = statusCode == 408 || statusCode == 429
+                            || (500..<600).contains(statusCode)
+                    } else {
+                        retryable = false
+                    }
+                    guard attempt < maximumAttempts, retryable else { throw error }
+                    let delay = 250 * (1 << (attempt - 1))
+                    print("⭐️ [OpenStar] Result submission attempt \(attempt) failed; retrying")
+                    try await Task.sleep(for: .milliseconds(delay))
+                    attempt += 1
                 }
-
-                let delay = 250 * (1 << (attempt - 1))
-
-                print(
-                    "⭐️ [OpenStar] Result submission attempt \(attempt) failed; retrying"
-                )
-
-                try await Task.sleep(
-                    for: .milliseconds(delay)
-                )
-                attempt += 1
             }
-        }
+        }.value
     }
 
     private func isRetryableCoordinatorError(

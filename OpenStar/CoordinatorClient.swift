@@ -55,6 +55,13 @@ final class CoordinatorClient: @unchecked Sendable {
     func claimWork(
         nodeID: UUID
     ) async throws -> WorkUnit? {
+        try await claimWork(nodeID: nodeID, maxWorkUnits: 1).first
+    }
+
+    func claimWork(
+        nodeID: UUID,
+        maxWorkUnits: Int
+    ) async throws -> [WorkUnit] {
         let url = makeURL(
             path: "v1/work/claim"
         )
@@ -68,7 +75,8 @@ final class CoordinatorClient: @unchecked Sendable {
 
         request.httpBody = try JSONEncoder().encode(
             WorkClaimRequest(
-                nodeID: nodeID
+                nodeID: nodeID,
+                maxWorkUnits: maxWorkUnits > 1 ? min(maxWorkUnits, 32) : nil
             )
         )
 
@@ -84,7 +92,7 @@ final class CoordinatorClient: @unchecked Sendable {
         }
 
         if httpResponse.statusCode == 204 {
-            return nil
+            return []
         }
 
         guard
@@ -101,10 +109,11 @@ final class CoordinatorClient: @unchecked Sendable {
             )
         }
 
-        return try JSONDecoder().decode(
-            WorkUnit.self,
-            from: data
-        )
+        let decoder = JSONDecoder()
+        if let batch = try? decoder.decode([WorkUnit].self, from: data) {
+            return batch
+        }
+        return [try decoder.decode(WorkUnit.self, from: data)]
     }
 
     // MARK: - Dataset

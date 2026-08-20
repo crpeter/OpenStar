@@ -65,6 +65,42 @@ struct LombScargleWorkPayload: Sendable {
 }
 
 nonisolated
+final class AdaptiveBatchController: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 1
+    private var smoothedDuration: Double?
+
+    var desiredBatchCount: Int { lock.withLock { count } }
+
+    @discardableResult
+    func observe(metalDuration: Double) -> Int {
+        lock.withLock {
+            guard metalDuration.isFinite, metalDuration >= 0 else { return count }
+            // Long dispatches shrink immediately; short observations ramp
+            // quickly while smoothing noise around the target range.
+            if metalDuration > 0.060 {
+                count = max(count / 2, 1)
+                smoothedDuration = metalDuration
+                return count
+            }
+            let smoothed = smoothedDuration.map { $0 * 0.6 + metalDuration * 0.4 }
+                ?? metalDuration
+            smoothedDuration = smoothed
+            // A deliberately wide hysteresis band around the 40--50 ms goal.
+            if smoothed < 0.035 { count = min(count * 2, 32) }
+            else if smoothed > 0.060 { count = max(count / 2, 1) }
+            return count
+        }
+    }
+}
+
+nonisolated
+struct LombScargleBatchGroup: Sendable {
+    let units: [WorkUnit]
+    let payloads: [LombScargleWorkPayload]
+}
+
+nonisolated
 enum LombScargleError: LocalizedError {
     case metalUnavailable
     case commandQueueUnavailable
@@ -129,7 +165,7 @@ enum LombScargleError: LocalizedError {
 }
 
 nonisolated
-final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
+final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable {
     // New domain-neutral workload name plus the existing project ID as a
     // compatibility alias. Both route to the same implementation.
     static let workloadID = "openstar.lomb-scargle.v1"
@@ -157,6 +193,9 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let preparedDatasets: PreparedDatasetCache
+    private let batchController: AdaptiveBatchController
+
+    var desiredBatchCount: Int { batchController.desiredBatchCount }
 
     private struct DatasetCacheKey: Hashable {
         let projectID: String
@@ -244,7 +283,10 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         }
     }
 
-    init(preparedDatasetCacheCapacity: Int = 4) throws {
+    init(
+        preparedDatasetCacheCapacity: Int = 4,
+        batchController: AdaptiveBatchController = AdaptiveBatchController()
+    ) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw LombScargleError.metalUnavailable
         }
@@ -276,6 +318,7 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         preparedDatasets = PreparedDatasetCache(
             capacity: preparedDatasetCacheCapacity
         )
+        self.batchController = batchController
     }
 
     @concurrent
@@ -283,134 +326,183 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         workUnit: WorkUnit,
         datasetData: Data?
     ) async throws -> WorkloadExecution {
-        let totalStarted = ProcessInfo.processInfo.systemUptime
-        try Task.checkCancellation()
-
-        guard let datasetData else {
-            throw LombScargleError.missingDataset
+        let members = try await executeBatch(
+            workUnits: [workUnit], datasetData: datasetData
+        )
+        guard let member = members.first else {
+            throw LombScargleError.invalidWorkUnit("empty batch execution")
         }
+        return try member.result.get()
+    }
 
-        let preparationStarted = ProcessInfo.processInfo.systemUptime
-        let dataset = try preparedDataset(
-            workUnit: workUnit,
-            data: datasetData
-        )
-        let preparationDuration =
-            ProcessInfo.processInfo.systemUptime - preparationStarted
+    @concurrent
+    func executeBatch(
+        workUnits: [WorkUnit],
+        datasetData: Data?
+    ) async throws -> [WorkloadBatchMember] {
+        guard let datasetData else { throw LombScargleError.missingDataset }
+        guard !workUnits.isEmpty else { return [] }
 
-        let payload = try Self.workPayload(
-            from: workUnit
-        )
+        var outcomes: [UUID: Result<WorkloadExecution, any Error>] = [:]
+        for unit in workUnits {
+            do { _ = try Self.workPayload(from: unit) }
+            catch { outcomes[unit.id] = .failure(error) }
+        }
+        for group in Self.contiguousGroups(workUnits) {
+            do {
+                try Task.checkCancellation()
+                let groupStarted = ProcessInfo.processInfo.systemUptime
+                let preparationStarted = groupStarted
+                let dataset = try preparedDataset(
+                    workUnit: group.units[0], data: datasetData
+                )
+                let preparationDuration = ProcessInfo.processInfo.systemUptime
+                    - preparationStarted
+                let combined = LombScargleWorkPayload(
+                    frequencyStartIndex: group.payloads[0].frequencyStartIndex,
+                    startFrequency: group.payloads[0].startFrequency,
+                    frequencyStep: group.payloads[0].frequencyStep,
+                    frequencyCount: group.payloads.reduce(0) { $0 + $1.frequencyCount }
+                )
+                let metal = try runMetalPowersSynchronously(
+                    payload: combined, dataset: dataset
+                )
+                let next = batchController.observe(metalDuration: metal.duration)
+                print(
+                    "⭐️ [OpenStar] Metal batch units=\(group.units.count) "
+                    + "frequencies=\(combined.frequencyCount) "
+                    + String(format: "duration=%.4fs nextBatch=%d", metal.duration, next)
+                )
 
-        let metalResult = try runMetalSynchronously(
-            payload: payload,
-            dataset: dataset
-        )
-
-        try Task.checkCancellation()
-
-        let validationStarted = ProcessInfo.processInfo.systemUptime
-
-        let validation = try LombScargleCPUValidator.validate(
-            coordinates: dataset.coordinates,
-            values: dataset.values,
-            metalBestIndex: metalResult.bestIndex,
-            metalBestPower: metalResult.bestPower,
-            startFrequency: payload.startFrequency,
-            frequencyStep: payload.frequencyStep,
-            frequencyCount: payload.frequencyCount
-        )
-
-        let validationDuration =
-            ProcessInfo.processInfo.systemUptime - validationStarted
-
-        guard validation.passed else {
-            throw LombScargleError.validationFailed(
-                validation
+                var offset = 0
+                let childMetalDurations = Self.allocatedDurations(
+                    total: metal.duration,
+                    frequencyCounts: group.payloads.map(\.frequencyCount)
+                )
+                var validated: [UUID: ValidatedResult] = [:]
+                for ((unit, payload), childMetalDuration) in zip(
+                    zip(group.units, group.payloads), childMetalDurations
+                ) {
+                    do {
+                        let slice = Array(metal.powers[offset..<(offset + payload.frequencyCount)])
+                        let numerical = try Self.reduce(
+                            powers: slice, payload: payload,
+                            metalDuration: childMetalDuration
+                        )
+                        validated[unit.id] = try validate(
+                            numerical: numerical, payload: payload, dataset: dataset
+                        )
+                    } catch {
+                        outcomes[unit.id] = .failure(error)
+                    }
+                    offset += payload.frequencyCount
+                }
+                let groupDuration = ProcessInfo.processInfo.systemUptime - groupStarted
+                let counts = group.payloads.map(\.frequencyCount)
+                let childTotalDurations = Self.allocatedDurations(
+                    total: groupDuration, frequencyCounts: counts
+                )
+                let childPreparationDurations = Self.allocatedDurations(
+                    total: preparationDuration, frequencyCounts: counts
+                )
+                for (((unit, payload), totalDuration), childPreparation) in zip(
+                    zip(zip(group.units, group.payloads), childTotalDurations),
+                    childPreparationDurations
+                ) {
+                    guard let result = validated[unit.id] else { continue }
+                    outcomes[unit.id] = .success(makeExecution(
+                        validated: result, payload: payload,
+                        totalDuration: totalDuration,
+                        preparationDuration: childPreparation,
+                        fusedMetalDuration: metal.duration,
+                        fusedGroupDuration: groupDuration,
+                        fusedPreparationDuration: preparationDuration
+                    ))
+                }
+            } catch is CancellationError {
+                // Preserve outcomes from earlier groups. This group and every
+                // later group remain recoverable through no-penalty results.
+                for unit in group.units where outcomes.index(forKey: unit.id) == nil {
+                    outcomes[unit.id] = .failure(WorkloadCancellation())
+                }
+                break
+            } catch {
+                for unit in group.units { outcomes[unit.id] = .failure(error) }
+            }
+        }
+        return workUnits.map {
+            WorkloadBatchMember(
+                workUnit: $0,
+                result: outcomes[$0.id] ?? .failure(WorkloadCancellation())
             )
         }
+    }
 
-        let totalDuration =
-            ProcessInfo.processInfo.systemUptime - totalStarted
+    static func contiguousGroups(_ units: [WorkUnit]) -> [LombScargleBatchGroup] {
+        let parsed = units.compactMap { unit -> (WorkUnit, LombScargleWorkPayload)? in
+            guard let payload = try? workPayload(from: unit) else { return nil }
+            return (unit, payload)
+        }.sorted { $0.1.frequencyStartIndex < $1.1.frequencyStartIndex }
 
-        let resultPayload: JSONValue = .object([
-            "bestFrequency": .number(metalResult.bestFrequency),
-            // Retained for the existing astronomy-oriented wire contract.
-            // Generic presentation treats this as reciprocal frequency.
-            "bestPeriodDays": .number(metalResult.reciprocalFrequency),
-            "bestPower": .number(metalResult.bestPower),
-            "bestFrequencyIndex": .number(
-                Double(payload.frequencyStartIndex + metalResult.bestIndex)
-            ),
-            "metalDurationSeconds": .number(metalResult.metalDuration),
-            "datasetPreparationDurationSeconds": .number(
-                preparationDuration
-            ),
-            "totalWorkloadDurationSeconds": .number(totalDuration),
-            "validation": .object([
-                "validatorID": .string(
-                    LombScargleValidation.validatorID
-                ),
-                "passed": .bool(true),
-                "cpuBestLocalIndex": .number(
-                    Double(validation.cpuBestLocalIndex)
-                ),
-                "cpuPowerAtMetalWinner": .number(
-                    validation.cpuPowerAtMetalWinner
-                ),
-                "absolutePowerError": .number(
-                    validation.absolutePowerError
-                ),
-                "allowedPowerError": .number(
-                    validation.allowedPowerError
-                ),
-                "durationSeconds": .number(validationDuration)
-            ])
-        ])
+        var groups: [LombScargleBatchGroup] = []
+        for item in parsed {
+            if let last = groups.last,
+               let priorUnit = last.units.last,
+               let prior = last.payloads.last,
+               priorUnit.projectID == item.0.projectID,
+               priorUnit.datasetID == item.0.datasetID,
+               priorUnit.workloadID == item.0.workloadID,
+               prior.frequencyStartIndex + prior.frequencyCount == item.1.frequencyStartIndex,
+               compatibleGrid(previous: prior, next: item.1) {
+                groups[groups.count - 1] = LombScargleBatchGroup(
+                    units: last.units + [item.0], payloads: last.payloads + [item.1]
+                )
+            } else {
+                groups.append(.init(units: [item.0], payloads: [item.1]))
+            }
+        }
+        return groups
+    }
 
-        return WorkloadExecution(
-            duration: totalDuration,
-            payload: resultPayload,
-            summary: WorkloadResultSummary(
-                title: "Lomb-Scargle Result",
-                fields: [
-                    WorkloadResultField(
-                        id: "reciprocal-frequency",
-                        label: "Reciprocal Frequency",
-                        value: String(
-                            format: "%.6f",
-                            metalResult.reciprocalFrequency
-                        )
-                    ),
-                    WorkloadResultField(
-                        id: "frequency",
-                        label: "Frequency",
-                        value: String(
-                            format: "%.6f",
-                            metalResult.bestFrequency
-                        )
-                    ),
-                    WorkloadResultField(
-                        id: "power",
-                        label: "Power",
-                        value: String(
-                            format: "%.6f",
-                            metalResult.bestPower
-                        )
-                    ),
-                    WorkloadResultField(
-                        id: "validator",
-                        label: "Local Validation",
-                        value: "Passed"
-                    )
-                ]
-            ),
-            legacyResultFields: LegacyResultFields(
-                bestFrequency: metalResult.bestFrequency,
-                bestPeriodDays: metalResult.reciprocalFrequency,
-                bestPower: metalResult.bestPower
-            )
+    private static func compatibleGrid(
+        previous: LombScargleWorkPayload, next: LombScargleWorkPayload
+    ) -> Bool {
+        let stepTolerance = 4 * max(
+            previous.frequencyStep.ulp,
+            next.frequencyStep.ulp
         )
+        guard abs(previous.frequencyStep - next.frequencyStep)
+                <= stepTolerance else { return false }
+        let expected = Double(previous.startFrequency)
+            + Double(previous.frequencyCount) * Double(previous.frequencyStep)
+        let actual = Double(next.startFrequency)
+        let representationTolerance = 4 * Double(max(
+            Float(expected).ulp,
+            next.startFrequency.ulp
+        ))
+        // Float rounding near the grid location is allowed, but never enough
+        // to conceal even one percent of a frequency bin.
+        let gridTolerance = Double(abs(previous.frequencyStep)) * 0.01
+        return abs(expected - actual)
+            <= min(representationTolerance, gridTolerance)
+    }
+
+    static func allocatedDurations(
+        total: Double, frequencyCounts: [Int]
+    ) -> [Double] {
+        guard !frequencyCounts.isEmpty else { return [] }
+        let denominator = frequencyCounts.reduce(0, +)
+        guard denominator > 0 else { return Array(repeating: 0, count: frequencyCounts.count) }
+        var allocated: [Double] = []
+        var used = 0.0
+        for (index, count) in frequencyCounts.enumerated() {
+            let value = index == frequencyCounts.count - 1
+                ? total - used
+                : total * Double(count) / Double(denominator)
+            allocated.append(value)
+            used += value
+        }
+        return allocated
     }
 
     static func workPayload(
@@ -501,12 +593,23 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         )
     }
 
+    private struct MetalPowers {
+        let duration: Double
+        let powers: [Float]
+    }
+
     private struct NumericalResult {
         let metalDuration: Double
         let bestIndex: Int
         let bestFrequency: Double
         let reciprocalFrequency: Double
         let bestPower: Double
+    }
+
+    private struct ValidatedResult {
+        let numerical: NumericalResult
+        let validation: LombScargleValidation
+        let validationDuration: Double
     }
 
     private func preparedDataset(
@@ -596,10 +699,109 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         )
     }
 
-    private func runMetalSynchronously(
+    private static func reduce(
+        powers: [Float],
+        payload: LombScargleWorkPayload,
+        metalDuration: Double
+    ) throws -> NumericalResult {
+        guard let winner = powers.enumerated().filter({ $0.element.isFinite })
+            .max(by: { $0.element < $1.element }) else {
+            throw LombScargleError.noFiniteResult
+        }
+        let frequency = Double(payload.startFrequency)
+            + Double(winner.offset) * Double(payload.frequencyStep)
+        guard frequency.isFinite, frequency > 0 else {
+            throw LombScargleError.noFiniteResult
+        }
+        return NumericalResult(
+            metalDuration: metalDuration, bestIndex: winner.offset,
+            bestFrequency: frequency, reciprocalFrequency: 1 / frequency,
+            bestPower: Double(winner.element)
+        )
+    }
+
+    private func validate(
+        numerical: NumericalResult,
         payload: LombScargleWorkPayload,
         dataset: PreparedDataset
-    ) throws -> NumericalResult {
+    ) throws -> ValidatedResult {
+        let started = ProcessInfo.processInfo.systemUptime
+        let validation = try LombScargleCPUValidator.validate(
+            coordinates: dataset.coordinates, values: dataset.values,
+            metalBestIndex: numerical.bestIndex,
+            metalBestPower: numerical.bestPower,
+            startFrequency: payload.startFrequency,
+            frequencyStep: payload.frequencyStep,
+            frequencyCount: payload.frequencyCount
+        )
+        guard validation.passed else {
+            throw LombScargleError.validationFailed(validation)
+        }
+        return ValidatedResult(
+            numerical: numerical,
+            validation: validation,
+            validationDuration: ProcessInfo.processInfo.systemUptime - started
+        )
+    }
+
+    private func makeExecution(
+        validated: ValidatedResult,
+        payload: LombScargleWorkPayload,
+        totalDuration: Double,
+        preparationDuration: Double,
+        fusedMetalDuration: Double,
+        fusedGroupDuration: Double,
+        fusedPreparationDuration: Double
+    ) -> WorkloadExecution {
+        let numerical = validated.numerical
+        let validation = validated.validation
+        let result: JSONValue = .object([
+            "bestFrequency": .number(numerical.bestFrequency),
+            "bestPeriodDays": .number(numerical.reciprocalFrequency),
+            "bestPower": .number(numerical.bestPower),
+            "bestFrequencyIndex": .number(Double(
+                payload.frequencyStartIndex + numerical.bestIndex
+            )),
+            "metalDurationSeconds": .number(numerical.metalDuration),
+            "datasetPreparationDurationSeconds": .number(preparationDuration),
+            "totalWorkloadDurationSeconds": .number(totalDuration),
+            "fusedDispatchMetalDurationSeconds": .number(fusedMetalDuration),
+            "fusedGroupWorkloadDurationSeconds": .number(fusedGroupDuration),
+            "fusedDatasetPreparationDurationSeconds": .number(
+                fusedPreparationDuration
+            ),
+            "validation": .object([
+                "validatorID": .string(LombScargleValidation.validatorID),
+                "passed": .bool(true),
+                "cpuBestLocalIndex": .number(Double(validation.cpuBestLocalIndex)),
+                "cpuPowerAtMetalWinner": .number(validation.cpuPowerAtMetalWinner),
+                "absolutePowerError": .number(validation.absolutePowerError),
+                "allowedPowerError": .number(validation.allowedPowerError),
+                "durationSeconds": .number(validated.validationDuration)
+            ])
+        ])
+        return WorkloadExecution(
+            duration: totalDuration, payload: result,
+            summary: WorkloadResultSummary(
+                title: "Lomb-Scargle Result",
+                fields: [
+                    .init(id: "frequency", label: "Frequency", value: String(format: "%.6f", numerical.bestFrequency)),
+                    .init(id: "power", label: "Power", value: String(format: "%.6f", numerical.bestPower)),
+                    .init(id: "validator", label: "Local Validation", value: "Passed")
+                ]
+            ),
+            legacyResultFields: .init(
+                bestFrequency: numerical.bestFrequency,
+                bestPeriodDays: numerical.reciprocalFrequency,
+                bestPower: numerical.bestPower
+            )
+        )
+    }
+
+    private func runMetalPowersSynchronously(
+        payload: LombScargleWorkPayload,
+        dataset: PreparedDataset
+    ) throws -> MetalPowers {
         let sampleCount = dataset.coordinates.count
 
         guard sampleCount <= Int(UInt32.max),
@@ -693,50 +895,22 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         let metalDuration =
             ProcessInfo.processInfo.systemUptime - started
 
+        // Do not begin potentially expensive slicing, reduction, and CPU
+        // validation after a user stop or background expiration.
+        try Task.checkCancellation()
+
         guard commandBuffer.status == .completed else {
             throw LombScargleError.commandFailed(
                 commandBuffer.error
             )
         }
 
-        let powers = powerBuffer.contents().bindMemory(
-            to: Float.self,
-            capacity: payload.frequencyCount
+        let pointer = powerBuffer.contents().bindMemory(
+            to: Float.self, capacity: payload.frequencyCount
         )
-
-        var bestIndex: Int?
-        var bestPower = -Float.infinity
-
-        for index in 0..<payload.frequencyCount {
-            let power = powers[index]
-
-            if power.isFinite && power > bestPower {
-                bestPower = power
-                bestIndex = index
-            }
-        }
-
-        guard let bestIndex,
-              bestPower.isFinite else {
-            throw LombScargleError.noFiniteResult
-        }
-
-        let bestFrequency =
-            Double(payload.startFrequency) +
-            Double(bestIndex) *
-            Double(payload.frequencyStep)
-
-        guard bestFrequency.isFinite,
-              bestFrequency > 0 else {
-            throw LombScargleError.noFiniteResult
-        }
-
-        return NumericalResult(
-            metalDuration: metalDuration,
-            bestIndex: bestIndex,
-            bestFrequency: bestFrequency,
-            reciprocalFrequency: 1.0 / bestFrequency,
-            bestPower: Double(bestPower)
+        return MetalPowers(
+            duration: metalDuration,
+            powers: Array(UnsafeBufferPointer(start: pointer, count: payload.frequencyCount))
         )
     }
 }
