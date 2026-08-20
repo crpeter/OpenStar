@@ -840,13 +840,13 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
 
         var gpuSampleCount = UInt32(sampleCount)
         var childStartFrequencies = payloads.map(\.startFrequency)
+        var childFrequencySteps = payloads.map(\.frequencyStep)
         var cumulative = 0
         var childEndOffsets = payloads.map { payload -> UInt32 in
             cumulative += payload.frequencyCount
             return UInt32(cumulative)
         }
         var childCount = UInt32(payloads.count)
-        var frequencyStep = payloads[0].frequencyStep
         var totalValueSquared = dataset.totalValueSquared
 
         encoder.setBytes(
@@ -859,11 +859,9 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             encoder.setBytes($0.baseAddress!, length: $0.count, index: 4)
         }
 
-        encoder.setBytes(
-            &frequencyStep,
-            length: MemoryLayout<Float>.stride,
-            index: 5
-        )
+        childFrequencySteps.withUnsafeBytes {
+            encoder.setBytes($0.baseAddress!, length: $0.count, index: 5)
+        }
 
         encoder.setBytes(
             &totalValueSquared,

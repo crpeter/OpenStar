@@ -232,6 +232,43 @@ struct OpenStarTests {
         #expect(fused[4096] == payloads[1].startFrequency)
     }
 
+    @Test func fusedFrequenciesPreserveFuseableChildStepULP() throws {
+        let firstStep = Float(0.00001)
+        let secondStep = firstStep.nextUp
+        let units = [
+            scopedWorkUnit(
+                projectID: "step-ulp", datasetID: "shared",
+                payload: .object([
+                    "frequencyStartIndex": .number(0),
+                    "startFrequency": .number(0.1),
+                    "frequencyStep": .number(Double(firstStep)),
+                    "frequencyCount": .number(8)
+                ])
+            ),
+            scopedWorkUnit(
+                projectID: "step-ulp", datasetID: "shared",
+                payload: .object([
+                    "frequencyStartIndex": .number(8),
+                    "startFrequency": .number(0.2),
+                    "frequencyStep": .number(Double(secondStep)),
+                    "frequencyCount": .number(8)
+                ])
+            )
+        ]
+        let groups = LombScargleWorker.contiguousGroups(units)
+        #expect(groups.count == 1)
+        #expect(groups[0].units.count == 2)
+
+        let payloads = groups[0].payloads
+        let independent = payloads.flatMap { payload in
+            (0..<payload.frequencyCount).map {
+                payload.startFrequency + Float($0) * payload.frequencyStep
+            }
+        }
+        #expect(LombScargleWorker.fusedFrequencies(payloads: payloads) == independent)
+        #expect(payloads[1].frequencyStep == payloads[0].frequencyStep.nextUp)
+    }
+
     @Test func coordinatorBatchClaimDecodesObjectArrayAndEmpty() async throws {
         let id = UUID()
         let object = Self.workData(id: id)
