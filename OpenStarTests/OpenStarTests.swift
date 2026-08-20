@@ -531,12 +531,15 @@ struct OpenStarTests {
         #expect(secondTask.completions == [false])
     }
 
+    @MainActor
     @Test func backgroundIdentifiersMatchWildcardAndAreUnique() {
         let first = BackgroundContributionIdentifiers.session(UUID())
         let second = BackgroundContributionIdentifiers.session(UUID())
 
-        #expect(BackgroundContributionIdentifiers.permitted ==
-            "com.openstar.OpenStar.contribution.*")
+        #expect(
+            BackgroundContributionIdentifiers.permitted ==
+                "com.openstar.OpenStar.contribution.*"
+        )
         #expect(first.hasPrefix("com.openstar.OpenStar.contribution."))
         #expect(second.hasPrefix("com.openstar.OpenStar.contribution."))
         #expect(first != second)
