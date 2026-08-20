@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import Accelerate
 
 nonisolated
 struct LombScargleValidation: Sendable {
@@ -66,6 +67,21 @@ enum LombScargleCPUValidator {
     private static let relativePowerTolerance = 0.01
     private static let localMaximumRelativeTolerance = 0.01
 
+    /// Per-validation scratch is deliberately local: validation requests may run
+    /// concurrently, while the three candidates in one request reuse these
+    /// buffers without allocating in the hot candidate loop.
+    private struct Scratch {
+        var angles: [Double]
+        var sines: [Double]
+        var cosines: [Double]
+
+        init(count: Int) {
+            angles = .init(repeating: 0, count: count)
+            sines = .init(repeating: 0, count: count)
+            cosines = .init(repeating: 0, count: count)
+        }
+    }
+
     /// Compatibility entry point for standalone validator callers. Worker hot
     /// paths use the validation-ready dataset overload below.
     static func validate(
@@ -92,6 +108,27 @@ enum LombScargleCPUValidator {
         )
     }
 
+    /// Test-only reference entry point. Validation policy remains shared with
+    /// production; only calculation of an individual candidate power differs.
+    static func validateScalarReference(
+        dataset: LombScargleValidationDataset,
+        metalBestIndex: Int,
+        metalBestPower: Double,
+        startFrequency: Float,
+        frequencyStep: Float,
+        frequencyCount: Int
+    ) throws -> LombScargleValidation {
+        try validate(
+            dataset: dataset,
+            metalBestIndex: metalBestIndex,
+            metalBestPower: metalBestPower,
+            startFrequency: startFrequency,
+            frequencyStep: frequencyStep,
+            frequencyCount: frequencyCount,
+            useScalarReference: true
+        )
+    }
+
     static func validate(
         dataset: LombScargleValidationDataset,
         metalBestIndex: Int,
@@ -99,6 +136,26 @@ enum LombScargleCPUValidator {
         startFrequency: Float,
         frequencyStep: Float,
         frequencyCount: Int
+    ) throws -> LombScargleValidation {
+        try validate(
+            dataset: dataset,
+            metalBestIndex: metalBestIndex,
+            metalBestPower: metalBestPower,
+            startFrequency: startFrequency,
+            frequencyStep: frequencyStep,
+            frequencyCount: frequencyCount,
+            useScalarReference: false
+        )
+    }
+
+    private static func validate(
+        dataset: LombScargleValidationDataset,
+        metalBestIndex: Int,
+        metalBestPower: Double,
+        startFrequency: Float,
+        frequencyStep: Float,
+        frequencyCount: Int,
+        useScalarReference: Bool
     ) throws -> LombScargleValidation {
         guard !dataset.coordinates.isEmpty else {
             throw LombScargleValidationError.invalidInput(
@@ -135,6 +192,18 @@ enum LombScargleCPUValidator {
             )
         }
 
+        guard dataset.coordinates.allSatisfy(\.isFinite) else {
+            throw LombScargleValidationError.invalidInput(
+                "coordinate sample is not finite"
+            )
+        }
+
+        guard dataset.values.allSatisfy(\.isFinite) else {
+            throw LombScargleValidationError.invalidInput(
+                "value sample is not finite"
+            )
+        }
+
         let candidateIndices = [
             metalBestIndex - 1,
             metalBestIndex,
@@ -146,16 +215,18 @@ enum LombScargleCPUValidator {
 
         var localPowers: [(index: Int, power: Double)] = []
         localPowers.reserveCapacity(candidateIndices.count)
+        var scratch = Scratch(count: dataset.coordinates.count)
 
         for index in candidateIndices {
             let frequency =
                 Double(startFrequency) +
                 Double(index) * Double(frequencyStep)
 
-            let power = try powerMatchingMetalFormula(
-                dataset: dataset,
-                frequency: frequency
-            )
+            let power = try useScalarReference
+                ? scalarPowerMatchingMetalFormula(dataset: dataset, frequency: frequency)
+                : powerMatchingMetalFormula(
+                    dataset: dataset, frequency: frequency, scratch: &scratch
+                )
 
             localPowers.append(
                 (index: index, power: power)
@@ -235,7 +306,8 @@ enum LombScargleCPUValidator {
 
     private static func powerMatchingMetalFormula(
         dataset: LombScargleValidationDataset,
-        frequency: Double
+        frequency: Double,
+        scratch: inout Scratch
     ) throws -> Double {
         guard frequency.isFinite,
               frequency > 0 else {
@@ -247,52 +319,36 @@ enum LombScargleCPUValidator {
         let twoPi = 2.0 * Double.pi
         let omega = twoPi * frequency
 
+        let count = vDSP_Length(dataset.coordinates.count)
+        var trigCount = Int32(dataset.coordinates.count)
+        var angleScale = 2.0 * omega
+        vDSP_vsmulD(dataset.coordinates, 1, &angleScale, &scratch.angles, 1, count)
+        vvsincos(&scratch.sines, &scratch.cosines, scratch.angles, &trigCount)
+
         var sumSin2 = 0.0
         var sumCos2 = 0.0
-
-        for coordinate in dataset.coordinates {
-            guard coordinate.isFinite else {
-                throw LombScargleValidationError.invalidInput(
-                    "coordinate sample is not finite"
-                )
-            }
-
-            let angle = 2.0 * omega * coordinate
-            sumSin2 += sin(angle)
-            sumCos2 += cos(angle)
-        }
+        vDSP_sveD(scratch.sines, 1, &sumSin2, count)
+        vDSP_sveD(scratch.cosines, 1, &sumCos2, count)
 
         let tau = atan2(
             sumSin2,
             sumCos2
         ) / (2.0 * omega)
 
+        angleScale = omega
+        var angleOffset = -omega * tau
+        vDSP_vsmulD(dataset.coordinates, 1, &angleScale, &scratch.angles, 1, count)
+        vDSP_vsaddD(scratch.angles, 1, &angleOffset, &scratch.angles, 1, count)
+        vvsincos(&scratch.sines, &scratch.cosines, scratch.angles, &trigCount)
+
         var sumYCos = 0.0
         var sumYSin = 0.0
         var sumCosSquared = 0.0
         var sumSinSquared = 0.0
-
-        for index in dataset.coordinates.indices {
-            let coordinate = dataset.coordinates[index]
-            let value = dataset.values[index]
-
-            guard value.isFinite else {
-                throw LombScargleValidationError.invalidInput(
-                    "value sample is not finite"
-                )
-            }
-
-            let shiftedCoordinate = coordinate - tau
-            let angle = omega * shiftedCoordinate
-            let cosine = cos(angle)
-            let sine = sin(angle)
-
-            sumYCos += value * cosine
-            sumYSin += value * sine
-
-            sumCosSquared += cosine * cosine
-            sumSinSquared += sine * sine
-        }
+        vDSP_dotprD(dataset.values, 1, scratch.cosines, 1, &sumYCos, count)
+        vDSP_dotprD(dataset.values, 1, scratch.sines, 1, &sumYSin, count)
+        vDSP_svesqD(scratch.cosines, 1, &sumCosSquared, count)
+        vDSP_svesqD(scratch.sines, 1, &sumSinSquared, count)
 
         guard sumCosSquared > 0,
               sumSinSquared > 0,
@@ -321,6 +377,51 @@ enum LombScargleCPUValidator {
             )
         }
 
+        return power
+    }
+
+    /// Straight-line implementation retained as the numerical oracle in tests.
+    private static func scalarPowerMatchingMetalFormula(
+        dataset: LombScargleValidationDataset,
+        frequency: Double
+    ) throws -> Double {
+        guard frequency.isFinite, frequency > 0 else {
+            throw LombScargleValidationError.invalidInput("candidate frequency is invalid")
+        }
+        let omega = 2.0 * Double.pi * frequency
+        var sumSin2 = 0.0
+        var sumCos2 = 0.0
+        for coordinate in dataset.coordinates {
+            sumSin2 += sin(2.0 * omega * coordinate)
+            sumCos2 += cos(2.0 * omega * coordinate)
+        }
+        let tau = atan2(sumSin2, sumCos2) / (2.0 * omega)
+        var sumYCos = 0.0
+        var sumYSin = 0.0
+        var sumCosSquared = 0.0
+        var sumSinSquared = 0.0
+        for index in dataset.coordinates.indices {
+            let angle = omega * (dataset.coordinates[index] - tau)
+            let cosine = cos(angle)
+            let sine = sin(angle)
+            sumYCos += dataset.values[index] * cosine
+            sumYSin += dataset.values[index] * sine
+            sumCosSquared += cosine * cosine
+            sumSinSquared += sine * sine
+        }
+        guard sumCosSquared > 0, sumSinSquared > 0,
+              dataset.totalValueSquared.isFinite, dataset.totalValueSquared > 0 else {
+            throw LombScargleValidationError.invalidInput(
+                "degenerate Lomb-Scargle normalization"
+            )
+        }
+        let power = ((sumYCos * sumYCos) / sumCosSquared
+            + (sumYSin * sumYSin) / sumSinSquared) / dataset.totalValueSquared
+        guard power.isFinite else {
+            throw LombScargleValidationError.invalidInput(
+                "CPU validator power is not finite"
+            )
+        }
         return power
     }
 }
