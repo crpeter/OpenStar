@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var manager = ContributionManager()
+    @Bindable var manager: ContributionManager
 
     var body: some View {
         NavigationStack {
@@ -433,5 +433,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(manager: ContributionManager())
 }

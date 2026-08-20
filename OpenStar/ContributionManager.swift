@@ -48,12 +48,15 @@ final class ContributionManager {
     private let initialEmptyClaimBackoff: Duration
     private let maximumEmptyClaimBackoff: Duration
     private let emptyClaimSleep: @Sendable (Duration) async throws -> Void
+    private let backgroundSession: BackgroundContributionSessionSupporting
 
     private var datasets: [DatasetCacheKey: Data] = [:]
     private var datasetRecency: [DatasetCacheKey] = []
     private let datasetCacheCapacity = 4
     private var task: Task<Void, Never>?
     private var projectStatusTask: Task<Void, Never>?
+    private var backgroundTask: BackgroundContributionTask?
+    private var backgroundSessionInitialAcceptedCount = 0
 
     init() {
         nodeID = NodeIdentity.id
@@ -62,6 +65,7 @@ final class ContributionManager {
         initialEmptyClaimBackoff = .milliseconds(25)
         maximumEmptyClaimBackoff = .milliseconds(500)
         emptyClaimSleep = { try await Task.sleep(for: $0) }
+        backgroundSession = BackgroundContributionSession.shared
 
         do {
             workloadRouter = try WorkloadRouter()
@@ -80,7 +84,9 @@ final class ContributionManager {
         maximumEmptyClaimBackoff: Duration = .milliseconds(500),
         emptyClaimSleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
-        }
+        },
+        backgroundSession: BackgroundContributionSessionSupporting =
+            BackgroundContributionSession.shared
     ) {
         self.nodeID = nodeID
         self.coordinator = coordinator
@@ -89,6 +95,7 @@ final class ContributionManager {
         self.initialEmptyClaimBackoff = initialEmptyClaimBackoff
         self.maximumEmptyClaimBackoff = maximumEmptyClaimBackoff
         self.emptyClaimSleep = emptyClaimSleep
+        self.backgroundSession = backgroundSession
     }
 
     var statusText: String {
@@ -131,6 +138,17 @@ final class ContributionManager {
 
         errorMessage = nil
         isContributing = true
+        backgroundSessionInitialAcceptedCount = unitsAccepted
+
+        do {
+            _ = try backgroundSession.submit()
+        } catch {
+            // A continued-processing request is an optional extension of the
+            // foreground session. Submission failure must not prevent work.
+            print(
+                "⭐️ [OpenStar] Background contribution unavailable: \(error)"
+            )
+        }
 
         task = Task { [weak self] in
             guard let self else {
@@ -267,6 +285,10 @@ final class ContributionManager {
 
                     if receipt.accepted {
                         unitsAccepted += 1
+                        backgroundTask?.recordAcceptedWork(
+                            unitsAccepted:
+                                unitsAccepted - backgroundSessionInitialAcceptedCount
+                        )
                     }
 
                     print(
@@ -296,6 +318,7 @@ final class ContributionManager {
             projectStatusTask?.cancel()
             projectStatusTask = nil
             task = nil
+            finishBackgroundTask(success: errorMessage == nil)
         }
     }
 
@@ -303,6 +326,32 @@ final class ContributionManager {
         task?.cancel()
         projectStatusTask?.cancel()
         isContributing = false
+        backgroundSession.cancel()
+        finishBackgroundTask(success: false)
+    }
+
+    func attachBackgroundTask(_ task: BackgroundContributionTask) {
+        guard isContributing else {
+            task.complete(success: false)
+            return
+        }
+
+        backgroundTask?.complete(success: false)
+        backgroundTask = task
+        task.recordAcceptedWork(
+            unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
+        )
+        task.expirationHandler = { [weak self, weak task] in
+            Task { @MainActor in
+                guard let self, self.backgroundTask === task else { return }
+                self.stop()
+            }
+        }
+    }
+
+    private func finishBackgroundTask(success: Bool) {
+        backgroundTask?.complete(success: success)
+        backgroundTask = nil
     }
 
     private func startProjectStatusRefresh() {
