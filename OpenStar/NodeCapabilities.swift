@@ -164,6 +164,12 @@ struct NodeRegistrationResponse: Codable, Sendable {
 nonisolated
 struct WorkClaimRequest: Codable, Sendable {
     let nodeID: UUID
+    let maxWorkUnits: Int?
+
+    init(nodeID: UUID, maxWorkUnits: Int? = nil) {
+        self.nodeID = nodeID
+        self.maxWorkUnits = maxWorkUnits
+    }
 }
 
 nonisolated
