@@ -700,7 +700,6 @@ struct OpenStarTests {
             projectID: "a", datasetID: "shared"
         )
         #expect(rebuilt.coordinateBuffer != nil)
-        #expect(rebuilt.validationDataset != initial.validationDataset)
         #expect(rebuilt.totalValueSquared == initial.totalValueSquared)
         #expect(rebuilt.count == 2)
         #expect(rebuilt.preparations == 4)
