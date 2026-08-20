@@ -419,8 +419,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                     total: metal.duration,
                     frequencyCounts: group.payloads.map(\.frequencyCount)
                 )
-                var reduced: [(unit: WorkUnit, payload: LombScargleWorkPayload,
-                               numerical: NumericalResult)] = []
+                var validated: [UUID: ValidatedResult] = [:]
                 for ((unit, payload), childMetalDuration) in zip(
                     zip(group.units, group.payloads), childMetalDurations
                 ) {
@@ -430,49 +429,13 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                             powers: slice, payload: payload,
                             metalDuration: childMetalDuration
                         )
-                        reduced.append((unit, payload, numerical))
+                        validated[unit.id] = try validate(
+                            numerical: numerical, payload: payload, dataset: dataset
+                        )
                     } catch {
                         outcomes[unit.id] = .failure(error)
                     }
                     offset += payload.frequencyCount
-                }
-                try Task.checkCancellation()
-                let validationStarted = ProcessInfo.processInfo.systemUptime
-                let validationResults = LombScargleCPUValidator.validateBatch(
-                    dataset: dataset.validationDataset,
-                    requests: reduced.map { item in
-                        .init(
-                            metalBestIndex: item.numerical.bestIndex,
-                            metalBestPower: item.numerical.bestPower,
-                            startFrequency: item.payload.startFrequency,
-                            frequencyStep: item.payload.frequencyStep,
-                            frequencyCount: item.payload.frequencyCount
-                        )
-                    }
-                )
-                let validationDuration = ProcessInfo.processInfo.systemUptime
-                    - validationStarted
-                let childValidationDurations = Self.allocatedDurations(
-                    total: validationDuration,
-                    frequencyCounts: reduced.map { $0.payload.frequencyCount }
-                )
-                var validated: [UUID: ValidatedResult] = [:]
-                for ((item, result), duration) in zip(
-                    zip(reduced, validationResults), childValidationDurations
-                ) {
-                    do {
-                        let validation = try result.get()
-                        guard validation.passed else {
-                            throw LombScargleError.validationFailed(validation)
-                        }
-                        validated[item.unit.id] = ValidatedResult(
-                            numerical: item.numerical,
-                            validation: validation,
-                            validationDuration: duration
-                        )
-                    } catch {
-                        outcomes[item.unit.id] = .failure(error)
-                    }
                 }
                 let groupDuration = ProcessInfo.processInfo.systemUptime - groupStarted
                 let counts = group.payloads.map(\.frequencyCount)
@@ -809,6 +772,30 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             metalDuration: metalDuration, bestIndex: winner.offset,
             bestFrequency: frequency, reciprocalFrequency: 1 / frequency,
             bestPower: Double(winner.element)
+        )
+    }
+
+    private func validate(
+        numerical: NumericalResult,
+        payload: LombScargleWorkPayload,
+        dataset: PreparedDataset
+    ) throws -> ValidatedResult {
+        let started = ProcessInfo.processInfo.systemUptime
+        let validation = try LombScargleCPUValidator.validate(
+            dataset: dataset.validationDataset,
+            metalBestIndex: numerical.bestIndex,
+            metalBestPower: numerical.bestPower,
+            startFrequency: payload.startFrequency,
+            frequencyStep: payload.frequencyStep,
+            frequencyCount: payload.frequencyCount
+        )
+        guard validation.passed else {
+            throw LombScargleError.validationFailed(validation)
+        }
+        return ValidatedResult(
+            numerical: numerical,
+            validation: validation,
+            validationDuration: ProcessInfo.processInfo.systemUptime - started
         )
     }
 
