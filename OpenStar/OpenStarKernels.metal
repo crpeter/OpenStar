@@ -11,16 +11,23 @@ kernel void openStarLombScargle(
     device const float *values [[buffer(1)]],
     device float *powers [[buffer(2)]],
     constant uint &sampleCount [[buffer(3)]],
-    constant float &startFrequency [[buffer(4)]],
+    constant float *childStartFrequencies [[buffer(4)]],
     constant float &frequencyStep [[buffer(5)]],
     constant float &totalValueSquared [[buffer(6)]],
+    constant uint *childEndOffsets [[buffer(7)]],
+    constant uint &childCount [[buffer(8)]],
     uint id [[thread_position_in_grid]]
 ) {
     constexpr float twoPi = 6.28318530717958647692f;
 
-    float frequency =
-        startFrequency +
-        float(id) * frequencyStep;
+    uint child = 0;
+    while (child + 1 < childCount && id >= childEndOffsets[child]) {
+        ++child;
+    }
+    uint childStartOffset = child == 0 ? 0 : childEndOffsets[child - 1];
+    uint childLocalFrequencyIndex = id - childStartOffset;
+    float frequency = childStartFrequencies[child]
+        + float(childLocalFrequencyIndex) * frequencyStep;
 
     float omega = twoPi * frequency;
 

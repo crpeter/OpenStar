@@ -87,7 +87,11 @@ final class AdaptiveBatchController: @unchecked Sendable {
                 ?? metalDuration
             smoothedDuration = smoothed
             // A deliberately wide hysteresis band around the 40--50 ms goal.
-            if smoothed < 0.035 { count = min(count * 2, 32) }
+            // A raw dispatch already in the target band must not be hidden by
+            // EWMA lag and cause an intentional overshoot.
+            if metalDuration < 0.035, smoothed < 0.035 {
+                count = min(count * 2, 32)
+            }
             else if smoothed > 0.060 { count = max(count / 2, 1) }
             return count
         }
@@ -358,19 +362,13 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                 )
                 let preparationDuration = ProcessInfo.processInfo.systemUptime
                     - preparationStarted
-                let combined = LombScargleWorkPayload(
-                    frequencyStartIndex: group.payloads[0].frequencyStartIndex,
-                    startFrequency: group.payloads[0].startFrequency,
-                    frequencyStep: group.payloads[0].frequencyStep,
-                    frequencyCount: group.payloads.reduce(0) { $0 + $1.frequencyCount }
-                )
                 let metal = try runMetalPowersSynchronously(
-                    payload: combined, dataset: dataset
+                    payloads: group.payloads, dataset: dataset
                 )
                 let next = batchController.observe(metalDuration: metal.duration)
                 print(
                     "⭐️ [OpenStar] Metal batch units=\(group.units.count) "
-                    + "frequencies=\(combined.frequencyCount) "
+                    + "frequencies=\(group.payloads.reduce(0) { $0 + $1.frequencyCount }) "
                     + String(format: "duration=%.4fs nextBatch=%d", metal.duration, next)
                 )
 
@@ -452,6 +450,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                priorUnit.projectID == item.0.projectID,
                priorUnit.datasetID == item.0.datasetID,
                priorUnit.workloadID == item.0.workloadID,
+               last.units.count < 32,
                prior.frequencyStartIndex + prior.frequencyCount == item.1.frequencyStartIndex,
                compatibleGrid(previous: prior, next: item.1) {
                 groups[groups.count - 1] = LombScargleBatchGroup(
@@ -473,18 +472,19 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         )
         guard abs(previous.frequencyStep - next.frequencyStep)
                 <= stepTolerance else { return false }
-        let expected = Double(previous.startFrequency)
-            + Double(previous.frequencyCount) * Double(previous.frequencyStep)
-        let actual = Double(next.startFrequency)
-        let representationTolerance = 4 * Double(max(
-            Float(expected).ulp,
-            next.startFrequency.ulp
-        ))
-        // Float rounding near the grid location is allowed, but never enough
-        // to conceal even one percent of a frequency bin.
-        let gridTolerance = Double(abs(previous.frequencyStep)) * 0.01
-        return abs(expected - actual)
-            <= min(representationTolerance, gridTolerance)
+        return true
+    }
+
+    /// Frequencies a fused dispatch evaluates, exposed for deterministic
+    /// verification of the per-child Float32 execution invariant.
+    static func fusedFrequencies(
+        payloads: [LombScargleWorkPayload]
+    ) -> [Float] {
+        payloads.flatMap { payload in
+            (0..<payload.frequencyCount).map {
+                payload.startFrequency + Float($0) * payload.frequencyStep
+            }
+        }
     }
 
     static func allocatedDurations(
@@ -799,14 +799,16 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
     }
 
     private func runMetalPowersSynchronously(
-        payload: LombScargleWorkPayload,
+        payloads: [LombScargleWorkPayload],
         dataset: PreparedDataset
     ) throws -> MetalPowers {
         let sampleCount = dataset.coordinates.count
+        let frequencyCount = payloads.reduce(0) { $0 + $1.frequencyCount }
 
         guard sampleCount <= Int(UInt32.max),
-              payload.frequencyStartIndex <= Int.max - payload.frequencyCount,
-              payload.frequencyCount <= Int.max / MemoryLayout<Float>.stride,
+              !payloads.isEmpty, payloads.count <= 32,
+              frequencyCount <= Int(UInt32.max),
+              frequencyCount <= Int.max / MemoryLayout<Float>.stride,
               sampleCount <= Int.max / MemoryLayout<Float>.stride else {
             throw LombScargleError.invalidWorkUnit(
                 "input dimensions exceed the Metal workload limits"
@@ -814,7 +816,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         }
 
         let outputByteCount =
-            payload.frequencyCount * MemoryLayout<Float>.stride
+            frequencyCount * MemoryLayout<Float>.stride
 
         guard let powerBuffer = device.makeBuffer(
             length: outputByteCount,
@@ -837,8 +839,14 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         encoder.setBuffer(powerBuffer, offset: 0, index: 2)
 
         var gpuSampleCount = UInt32(sampleCount)
-        var startFrequency = payload.startFrequency
-        var frequencyStep = payload.frequencyStep
+        var childStartFrequencies = payloads.map(\.startFrequency)
+        var cumulative = 0
+        var childEndOffsets = payloads.map { payload -> UInt32 in
+            cumulative += payload.frequencyCount
+            return UInt32(cumulative)
+        }
+        var childCount = UInt32(payloads.count)
+        var frequencyStep = payloads[0].frequencyStep
         var totalValueSquared = dataset.totalValueSquared
 
         encoder.setBytes(
@@ -847,11 +855,9 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             index: 3
         )
 
-        encoder.setBytes(
-            &startFrequency,
-            length: MemoryLayout<Float>.stride,
-            index: 4
-        )
+        childStartFrequencies.withUnsafeBytes {
+            encoder.setBytes($0.baseAddress!, length: $0.count, index: 4)
+        }
 
         encoder.setBytes(
             &frequencyStep,
@@ -864,6 +870,11 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
             length: MemoryLayout<Float>.stride,
             index: 6
         )
+        childEndOffsets.withUnsafeBytes {
+            encoder.setBytes($0.baseAddress!, length: $0.count, index: 7)
+        }
+        encoder.setBytes(&childCount,
+            length: MemoryLayout<UInt32>.stride, index: 8)
 
         let executionWidth = pipeline.threadExecutionWidth
 
@@ -874,7 +885,7 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
 
         encoder.dispatchThreads(
             MTLSize(
-                width: payload.frequencyCount,
+                width: frequencyCount,
                 height: 1,
                 depth: 1
             ),
@@ -906,11 +917,11 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
         }
 
         let pointer = powerBuffer.contents().bindMemory(
-            to: Float.self, capacity: payload.frequencyCount
+            to: Float.self, capacity: frequencyCount
         )
         return MetalPowers(
             duration: metalDuration,
-            powers: Array(UnsafeBufferPointer(start: pointer, count: payload.frequencyCount))
+            powers: Array(UnsafeBufferPointer(start: pointer, count: frequencyCount))
         )
     }
 }

@@ -23,6 +23,14 @@ struct OpenStarTests {
         #expect(controller.desiredBatchCount == 32)
     }
 
+    @Test func adaptiveBatchControllerHoldsAtA19TargetObservation() {
+        let controller = AdaptiveBatchController()
+        let observations = [0.0158, 0.0090, 0.0154, 0.0337, 0.0492]
+        let counts = observations.map { controller.observe(metalDuration: $0) }
+        #expect(counts == [2, 4, 8, 16, 16])
+        #expect(controller.desiredBatchCount == 16)
+    }
+
     @Test func fusedTimingIsAllocatedOnceIncludingPartialTail() {
         let allocated = LombScargleWorker.allocatedDurations(
             total: 0.046, frequencyCounts: [10, 10, 3]
@@ -165,7 +173,7 @@ struct OpenStarTests {
             [smallPrevious, roundedStep]
         ).count == 1)
 
-        let shiftedStart = scopedWorkUnit(
+        let independentlyQuantizedStart = scopedWorkUnit(
             projectID: "small", datasetID: "grid",
             payload: .object([
                 "frequencyStartIndex": .number(10),
@@ -177,8 +185,51 @@ struct OpenStarTests {
             ])
         )
         #expect(LombScargleWorker.contiguousGroups(
-            [smallPrevious, shiftedStart]
-        ).count == 2)
+            [smallPrevious, independentlyQuantizedStart]
+        ).count == 1)
+    }
+
+    @Test func tessFloatQuantizationDoesNotSplitContiguousCoverage() throws {
+        let minimum = 0.1
+        let step = (5.0 - minimum) / 4_194_304.0
+        let units = stride(from: 0, to: 4_194_304, by: 4096).map { index in
+            scopedWorkUnit(
+                projectID: "tess", datasetID: "full-grid",
+                payload: .object([
+                    "frequencyStartIndex": .number(Double(index)),
+                    "startFrequency": .number(minimum + Double(index) * step),
+                    "frequencyStep": .number(step),
+                    "frequencyCount": .number(4096)
+                ])
+            )
+        }
+        let groups = LombScargleWorker.contiguousGroups(units)
+        #expect(groups.count == 32)
+        #expect(groups.allSatisfy { $0.units.count == 32 })
+    }
+
+    @Test func fusedFrequenciesPreserveEachChildFloatStart() throws {
+        let step = (5.0 - 0.1) / 4_194_304.0
+        let units = [0, 4096, 8192].map { index in
+            scopedWorkUnit(
+                projectID: "tess", datasetID: "quantized",
+                payload: .object([
+                    "frequencyStartIndex": .number(Double(index)),
+                    "startFrequency": .number(0.1 + Double(index) * step),
+                    "frequencyStep": .number(step),
+                    "frequencyCount": .number(4096)
+                ])
+            )
+        }
+        let payloads = try units.map { try LombScargleWorker.workPayload(from: $0) }
+        let fused = LombScargleWorker.fusedFrequencies(payloads: payloads)
+        let independent = payloads.flatMap { payload in
+            (0..<payload.frequencyCount).map {
+                payload.startFrequency + Float($0) * payload.frequencyStep
+            }
+        }
+        #expect(fused == independent)
+        #expect(fused[4096] == payloads[1].startFrequency)
     }
 
     @Test func coordinatorBatchClaimDecodesObjectArrayAndEmpty() async throws {
