@@ -13,6 +13,7 @@ kernel void openStarLombScargle(
     constant uint &sampleCount [[buffer(3)]],
     constant float &startFrequency [[buffer(4)]],
     constant float &frequencyStep [[buffer(5)]],
+    constant float &totalValueSquared [[buffer(6)]],
     uint id [[thread_position_in_grid]]
 ) {
     constexpr float twoPi = 6.28318530717958647692f;
@@ -47,8 +48,6 @@ kernel void openStarLombScargle(
     float sumCosSquared = 0.0f;
     float sumSinSquared = 0.0f;
 
-    float totalValueSquared = 0.0f;
-
     for (uint sample = 0; sample < sampleCount; ++sample) {
         float shiftedTime =
             coordinates[sample] - tau;
@@ -65,8 +64,6 @@ kernel void openStarLombScargle(
 
         sumCosSquared += cosine * cosine;
         sumSinSquared += sine * sine;
-
-        totalValueSquared += value * value;
     }
 
     if (
