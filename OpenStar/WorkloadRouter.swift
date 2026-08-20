@@ -57,6 +57,21 @@ protocol OpenStarWorkloadHandler: Sendable {
 }
 
 nonisolated
+struct WorkloadBatchMember: @unchecked Sendable {
+    let workUnit: WorkUnit
+    let result: Result<WorkloadExecution, any Error>
+}
+
+nonisolated
+protocol OpenStarBatchWorkloadHandler: OpenStarWorkloadHandler {
+    var desiredBatchCount: Int { get }
+    func executeBatch(
+        workUnits: [WorkUnit],
+        datasetData: Data?
+    ) async throws -> [WorkloadBatchMember]
+}
+
+nonisolated
 enum WorkloadRouterError: LocalizedError, WorkFailureClassifyingError {
     case unsupportedWorkload(String)
     case duplicateWorkload(String)
@@ -89,6 +104,12 @@ final class WorkloadRouter: @unchecked Sendable {
     private let handlersByWorkloadID: [String: any OpenStarWorkloadHandler]
 
     let supportedCapabilities: [WorkloadCapability]
+
+    var desiredBatchCount: Int {
+        handlersByWorkloadID.values.compactMap {
+            ($0 as? any OpenStarBatchWorkloadHandler)?.desiredBatchCount
+        }.max().map { min(max($0, 1), 32) } ?? 1
+    }
 
     convenience init() throws {
         try self.init(handlers: [
@@ -137,6 +158,34 @@ final class WorkloadRouter: @unchecked Sendable {
         return try await handler.execute(
             workUnit: workUnit,
             datasetData: datasetData
+        )
+    }
+
+
+    func executeBatch(
+        workUnits: [WorkUnit],
+        datasetData: Data?
+    ) async throws -> [WorkloadBatchMember] {
+        guard let first = workUnits.first else { return [] }
+        guard let handler = handlersByWorkloadID[first.workloadID] else {
+            throw WorkloadRouterError.unsupportedWorkload(first.workloadID)
+        }
+        guard let batching = handler as? any OpenStarBatchWorkloadHandler else {
+            var results: [WorkloadBatchMember] = []
+            for unit in workUnits {
+                do {
+                    let execution = try await handler.execute(
+                        workUnit: unit, datasetData: datasetData
+                    )
+                    results.append(.init(workUnit: unit, result: .success(execution)))
+                } catch {
+                    results.append(.init(workUnit: unit, result: .failure(error)))
+                }
+            }
+            return results
+        }
+        return try await batching.executeBatch(
+            workUnits: workUnits, datasetData: datasetData
         )
     }
 }

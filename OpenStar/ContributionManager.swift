@@ -175,132 +175,89 @@ final class ContributionManager {
                         continue
                     }
 
-                    guard let workUnit = try await coordinator.claimWork(
-                        nodeID: nodeID
-                    ) else {
+                    let claimed = try await coordinator.claimWork(
+                        nodeID: nodeID,
+                        maxWorkUnits: workloadRouter.desiredBatchCount
+                    )
+                    guard let first = claimed.first else {
                         try await emptyClaimSleep(emptyClaimBackoff)
                         emptyClaimBackoff = min(
-                            emptyClaimBackoff * 2,
-                            maximumEmptyClaimBackoff
+                            emptyClaimBackoff * 2, maximumEmptyClaimBackoff
                         )
                         continue
                     }
-
-                    // A successful claim means work is flowing. Return to the
-                    // shortest poll delay for the next genuinely empty claim.
                     emptyClaimBackoff = initialEmptyClaimBackoff
+                    currentProject = first.projectID
+                    currentWorkloadID = first.workloadID
+                    currentWorkUnitID = first.id
 
-                    currentProject = workUnit.projectID
-                    currentWorkloadID = workUnit.workloadID
-                    currentWorkUnitID = workUnit.id
+                    let data: Data?
+                    if let datasetID = first.datasetID {
+                        data = try await datasetData(
+                            projectID: first.projectID, datasetID: datasetID
+                        )
+                    } else { data = nil }
 
-                    print(
-                        "⭐️ [OpenStar] Claimed \(workUnit.id) · \(workUnit.workloadID)"
-                    )
-
-                    let result: WorkResult
-
+                    availability = WorkerEnvironment.currentAvailability()
+                    let members: [WorkloadBatchMember]
                     do {
-                        // Availability may change between claim and execution.
-                        // Returning environment-unavailable releases this lease
-                        // without penalizing the node.
-                        availability = WorkerEnvironment.currentAvailability()
                         try WorkerEnvironment.requireAvailable()
-
-                        let data: Data?
-
-                        if let datasetID = workUnit.datasetID {
-                            data = try await datasetData(
-                                projectID: workUnit.projectID,
-                                datasetID: datasetID
-                            )
-                        } else {
-                            data = nil
-                        }
-
-                        // Dataset download may race a foreground transition.
-                        availability = WorkerEnvironment.currentAvailability()
-                        try WorkerEnvironment.requireAvailable()
-
-                        let execution = try await workloadRouter.execute(
-                            workUnit: workUnit,
-                            datasetData: data
+                        members = try await workloadRouter.executeBatch(
+                            workUnits: claimed, datasetData: data
                         )
-
-                        try Task.checkCancellation()
-
-                        unitsCompleted += 1
-                        totalComputeSeconds += execution.duration
-                        lastWorkUnitDuration = execution.duration
-                        lastResultSummary = execution.summary
-
-                        let legacy = execution.legacyResultFields
-
-                        result = WorkResult(
-                            workUnitID: workUnit.id,
-                            nodeID: nodeID,
-                            status: .completed,
-                            duration: execution.duration,
-                            payload: execution.payload,
-                            errorMessage: nil,
-                            failureKind: nil,
-                            bestFrequency: legacy.bestFrequency,
-                            bestPeriodDays: legacy.bestPeriodDays,
-                            bestPower: legacy.bestPower
-                        )
-
                     } catch is CancellationError {
-                        break
+                        // Cancellation must release every already-claimed lease.
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(CancellationError()))
+                        }
                     } catch {
-                        let failureKind =
-                            classifyFailure(error)
-
-                        result = WorkResult(
-                            workUnitID: workUnit.id,
-                            nodeID: nodeID,
-                            status: .failed,
-                            duration: nil,
-                            payload: nil,
-                            errorMessage: error.localizedDescription,
-                            failureKind: failureKind,
-                            bestFrequency: nil,
-                            bestPeriodDays: nil,
-                            bestPower: nil
-                        )
-
-                        print(
-                            "⭐️ [OpenStar] Work unit failed "
-                            + "[\(failureKind.rawValue)]: "
-                            + error.localizedDescription
-                        )
+                        members = claimed.map {
+                            .init(workUnit: $0, result: .failure(error))
+                        }
                     }
 
-                    // A computed result must not be replaced by a failed result
-                    // merely because its first submission hit a transient
-                    // network error. Retry the exact same work-unit
-                    // result before this worker claims anything else.
-                    isSubmitting = true
-                    let receipt = try await submitWithRetry(
-                        result: result
-                    )
-                    isSubmitting = false
-
-                    if receipt.accepted {
-                        unitsAccepted += 1
-                        backgroundTask?.recordAcceptedWork(
-                            unitsAccepted:
-                                unitsAccepted - backgroundSessionInitialAcceptedCount
-                        )
+                    for member in members {
+                        currentWorkUnitID = member.workUnit.id
+                        let result: WorkResult
+                        switch member.result {
+                        case .success(let execution):
+                            unitsCompleted += 1
+                            totalComputeSeconds += execution.duration
+                            lastWorkUnitDuration = execution.duration
+                            lastResultSummary = execution.summary
+                            let legacy = execution.legacyResultFields
+                            result = WorkResult(
+                                workUnitID: member.workUnit.id, nodeID: nodeID,
+                                status: .completed, duration: execution.duration,
+                                payload: execution.payload, errorMessage: nil,
+                                failureKind: nil,
+                                bestFrequency: legacy.bestFrequency,
+                                bestPeriodDays: legacy.bestPeriodDays,
+                                bestPower: legacy.bestPower
+                            )
+                        case .failure(let error):
+                            result = WorkResult(
+                                workUnitID: member.workUnit.id, nodeID: nodeID,
+                                status: .failed, duration: nil, payload: nil,
+                                errorMessage: error.localizedDescription,
+                                failureKind: classifyFailure(error),
+                                bestFrequency: nil, bestPeriodDays: nil,
+                                bestPower: nil
+                            )
+                        }
+                        isSubmitting = true
+                        let receipt = try await submitWithRetry(result: result)
+                        isSubmitting = false
+                        if receipt.accepted {
+                            unitsAccepted += 1
+                            backgroundTask?.recordAcceptedWork(
+                                unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
+                            )
+                        }
                     }
-
-                    print(
-                        "⭐️ [OpenStar] Server response: \(receipt.message)"
-                    )
-
                     currentWorkUnitID = nil
                     currentWorkloadID = nil
                     availability = WorkerEnvironment.currentAvailability()
-
                     await Task.yield()
                 }
             } catch is CancellationError {
