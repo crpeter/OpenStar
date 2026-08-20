@@ -325,6 +325,16 @@ final class ContributionManager {
     }
 
     func stop() {
+        stop(userInitiated: true)
+    }
+
+    private func stop(userInitiated: Bool) {
+        if userInitiated {
+            backgroundContributionLog(
+                "User stop caused cancellation for: "
+                + (backgroundRequestIdentifier ?? "no submitted identifier")
+            )
+        }
         task?.cancel()
         projectStatusTask?.cancel()
         isContributing = false
@@ -333,29 +343,57 @@ final class ContributionManager {
     }
 
     func attachBackgroundTask(_ task: BackgroundContributionTask) {
-        guard isContributing,
-              task.identifier == backgroundRequestIdentifier else {
-            task.complete(success: false)
+        let expectedIdentifier = backgroundRequestIdentifier
+        let matchesExpected = task.identifier == expectedIdentifier
+        backgroundContributionLog(
+            "Task received: \(task.identifier); matches expected request "
+            + "identifier: \(matchesExpected); contribution active: "
+            + "\(isContributing)"
+        )
+        guard isContributing, matchesExpected else {
+            backgroundContributionLog(
+                "Task rejected: \(task.identifier)"
+            )
+            completeBackgroundTask(task, success: false)
             return
         }
 
-        backgroundTask?.complete(success: false)
+        if let backgroundTask {
+            completeBackgroundTask(backgroundTask, success: false)
+        }
         backgroundTask = task
+        backgroundContributionLog("Task accepted/attached: \(task.identifier)")
         task.recordAcceptedWork(
             unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
         )
         task.expirationHandler = { [weak self, weak task] in
             Task { @MainActor in
-                guard let self, self.backgroundTask === task else { return }
-                self.stop()
+                guard let self, let task,
+                      self.backgroundTask === task else { return }
+                backgroundContributionLog(
+                    "expirationHandler fired for \(task.identifier)"
+                )
+                self.stop(userInitiated: false)
             }
         }
     }
 
     private func finishBackgroundTask(success: Bool) {
-        backgroundTask?.complete(success: success)
+        if let backgroundTask {
+            completeBackgroundTask(backgroundTask, success: success)
+        }
         backgroundTask = nil
         backgroundRequestIdentifier = nil
+    }
+
+    private func completeBackgroundTask(
+        _ task: BackgroundContributionTask,
+        success: Bool
+    ) {
+        backgroundContributionLog(
+            "Background task completed: \(task.identifier); success: \(success)"
+        )
+        task.complete(success: success)
     }
 
     private func startProjectStatusRefresh() {
