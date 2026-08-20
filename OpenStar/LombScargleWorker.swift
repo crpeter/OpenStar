@@ -156,8 +156,90 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
+    private let preparedDatasets: PreparedDatasetCache
 
-    init() throws {
+    private struct DatasetCacheKey: Hashable {
+        let projectID: String
+        let datasetID: String
+    }
+
+    private final class PreparedDataset: @unchecked Sendable {
+        let coordinates: [Float]
+        let values: [Float]
+        let coordinateBuffer: MTLBuffer
+        let valueBuffer: MTLBuffer
+
+        init(
+            coordinates: [Float],
+            values: [Float],
+            coordinateBuffer: MTLBuffer,
+            valueBuffer: MTLBuffer
+        ) {
+            self.coordinates = coordinates
+            self.values = values
+            self.coordinateBuffer = coordinateBuffer
+            self.valueBuffer = valueBuffer
+        }
+    }
+
+    private final class PreparedDatasetCache: @unchecked Sendable {
+        private let capacity: Int
+        private var values: [DatasetCacheKey: PreparedDataset] = [:]
+        private var recency: [DatasetCacheKey] = []
+        private var preparationCount = 0
+        private let lock = NSLock()
+
+        init(capacity: Int) {
+            self.capacity = max(1, capacity)
+        }
+
+        func value(
+            for key: DatasetCacheKey,
+            prepare: () throws -> PreparedDataset
+        ) rethrows -> PreparedDataset {
+            lock.lock()
+            defer { lock.unlock() }
+
+            if let value = values[key] {
+                touch(key)
+                return value
+            }
+
+            let value = try prepare()
+            preparationCount += 1
+            if values.count == capacity, let oldest = recency.first {
+                values.removeValue(forKey: oldest)
+                recency.removeFirst()
+            }
+            values[key] = value
+            recency.append(key)
+            return value
+        }
+
+        private func touch(_ key: DatasetCacheKey) {
+            recency.removeAll { $0 == key }
+            recency.append(key)
+        }
+
+        func debugState(for key: DatasetCacheKey) -> (
+            coordinateBuffer: ObjectIdentifier?,
+            valueBuffer: ObjectIdentifier?,
+            count: Int,
+            preparations: Int
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            let value = values[key]
+            return (
+                value.map { ObjectIdentifier($0.coordinateBuffer as AnyObject) },
+                value.map { ObjectIdentifier($0.valueBuffer as AnyObject) },
+                values.count,
+                preparationCount
+            )
+        }
+    }
+
+    init(preparedDatasetCacheCapacity: Int = 4) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw LombScargleError.metalUnavailable
         }
@@ -186,6 +268,9 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
 
         self.device = device
         self.commandQueue = commandQueue
+        preparedDatasets = PreparedDatasetCache(
+            capacity: preparedDatasetCacheCapacity
+        )
     }
 
     @concurrent
@@ -193,22 +278,24 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         workUnit: WorkUnit,
         datasetData: Data?
     ) async throws -> WorkloadExecution {
+        let totalStarted = ProcessInfo.processInfo.systemUptime
         try Task.checkCancellation()
 
         guard let datasetData else {
             throw LombScargleError.missingDataset
         }
 
-        let dataset = try JSONDecoder().decode(
-            LombScargleDataset.self,
-            from: datasetData
+        let preparationStarted = ProcessInfo.processInfo.systemUptime
+        let dataset = try preparedDataset(
+            workUnit: workUnit,
+            data: datasetData
         )
+        let preparationDuration =
+            ProcessInfo.processInfo.systemUptime - preparationStarted
 
         let payload = try Self.workPayload(
             from: workUnit
         )
-
-        let totalStarted = ProcessInfo.processInfo.systemUptime
 
         let metalResult = try runMetalSynchronously(
             payload: payload,
@@ -251,6 +338,10 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
                 Double(payload.frequencyStartIndex + metalResult.bestIndex)
             ),
             "metalDurationSeconds": .number(metalResult.metalDuration),
+            "datasetPreparationDurationSeconds": .number(
+                preparationDuration
+            ),
+            "totalWorkloadDurationSeconds": .number(totalDuration),
             "validation": .object([
                 "validatorID": .string(
                     LombScargleValidation.validatorID
@@ -413,10 +504,46 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         let bestPower: Double
     }
 
-    private func runMetalSynchronously(
-        payload: LombScargleWorkPayload,
-        dataset: LombScargleDataset
-    ) throws -> NumericalResult {
+    private func preparedDataset(
+        workUnit: WorkUnit,
+        data: Data
+    ) throws -> PreparedDataset {
+        guard let datasetID = workUnit.datasetID else {
+            return try prepareDataset(data)
+        }
+
+        let key = DatasetCacheKey(
+            projectID: workUnit.projectID,
+            datasetID: datasetID
+        )
+        return try preparedDatasets.value(for: key) {
+            try prepareDataset(data)
+        }
+    }
+
+    func preparedDatasetDebugState(
+        projectID: String,
+        datasetID: String
+    ) -> (
+        coordinateBuffer: ObjectIdentifier?,
+        valueBuffer: ObjectIdentifier?,
+        count: Int,
+        preparations: Int
+    ) {
+        preparedDatasets.debugState(
+            for: DatasetCacheKey(
+                projectID: projectID,
+                datasetID: datasetID
+            )
+        )
+    }
+
+    private func prepareDataset(_ data: Data) throws -> PreparedDataset {
+        let dataset = try JSONDecoder().decode(
+            LombScargleDataset.self,
+            from: data
+        )
+
         guard !dataset.coordinates.isEmpty,
               dataset.coordinates.count == dataset.values.count,
               dataset.coordinates.allSatisfy(\.isFinite),
@@ -424,6 +551,39 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
             throw LombScargleError.invalidDataset
         }
 
+        guard dataset.coordinates.count <= Int(UInt32.max),
+              dataset.coordinates.count <=
+                Int.max / MemoryLayout<Float>.stride else {
+            throw LombScargleError.invalidWorkUnit(
+                "input dimensions exceed the Metal workload limits"
+            )
+        }
+
+        let byteCount = dataset.coordinates.count * MemoryLayout<Float>.stride
+        guard let coordinateBuffer = device.makeBuffer(
+            bytes: dataset.coordinates,
+            length: byteCount,
+            options: .storageModeShared
+        ), let valueBuffer = device.makeBuffer(
+            bytes: dataset.values,
+            length: byteCount,
+            options: .storageModeShared
+        ) else {
+            throw LombScargleError.bufferAllocationFailed
+        }
+
+        return PreparedDataset(
+            coordinates: dataset.coordinates,
+            values: dataset.values,
+            coordinateBuffer: coordinateBuffer,
+            valueBuffer: valueBuffer
+        )
+    }
+
+    private func runMetalSynchronously(
+        payload: LombScargleWorkPayload,
+        dataset: PreparedDataset
+    ) throws -> NumericalResult {
         let sampleCount = dataset.coordinates.count
 
         guard sampleCount <= Int(UInt32.max),
@@ -435,23 +595,10 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
             )
         }
 
-        let sampleByteCount =
-            sampleCount * MemoryLayout<Float>.stride
-
         let outputByteCount =
             payload.frequencyCount * MemoryLayout<Float>.stride
 
-        guard let coordinateBuffer = device.makeBuffer(
-            bytes: dataset.coordinates,
-            length: sampleByteCount,
-            options: .storageModeShared
-        ),
-        let valueBuffer = device.makeBuffer(
-            bytes: dataset.values,
-            length: sampleByteCount,
-            options: .storageModeShared
-        ),
-        let powerBuffer = device.makeBuffer(
+        guard let powerBuffer = device.makeBuffer(
             length: outputByteCount,
             options: .storageModeShared
         ) else {
@@ -467,8 +614,8 @@ final class LombScargleWorker: OpenStarWorkloadHandler, @unchecked Sendable {
         }
 
         encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(coordinateBuffer, offset: 0, index: 0)
-        encoder.setBuffer(valueBuffer, offset: 0, index: 1)
+        encoder.setBuffer(dataset.coordinateBuffer, offset: 0, index: 0)
+        encoder.setBuffer(dataset.valueBuffer, offset: 0, index: 1)
         encoder.setBuffer(powerBuffer, offset: 0, index: 2)
 
         var gpuSampleCount = UInt32(sampleCount)

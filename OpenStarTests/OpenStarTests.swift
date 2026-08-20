@@ -124,6 +124,106 @@ struct OpenStarTests {
         }
     }
 
+    @Test
+    func lombScarglePreparedDatasetCacheReusesAndEvictsByScopedID() async throws {
+        let worker = try LombScargleWorker(preparedDatasetCacheCapacity: 2)
+        let data = Data(
+            #"{"coordinates":[0,1,2,3,4,5],"values":[0,1,0,-1,0,1]}"#.utf8
+        )
+        let payload: JSONValue = .object([
+            "frequencyStartIndex": .number(0),
+            "startFrequency": .number(0.05),
+            "frequencyStep": .number(0.01),
+            "frequencyCount": .number(20)
+        ])
+
+        let first = try await worker.execute(
+            workUnit: scopedWorkUnit(
+                projectID: "a", datasetID: "shared", payload: payload
+            ),
+            datasetData: data
+        )
+        let initial = worker.preparedDatasetDebugState(
+            projectID: "a", datasetID: "shared"
+        )
+        let repeated = try await worker.execute(
+            workUnit: scopedWorkUnit(
+                projectID: "a", datasetID: "shared", payload: payload
+            ),
+            datasetData: data
+        )
+        let reused = worker.preparedDatasetDebugState(
+            projectID: "a", datasetID: "shared"
+        )
+
+        #expect(initial.coordinateBuffer == reused.coordinateBuffer)
+        #expect(initial.valueBuffer == reused.valueBuffer)
+        #expect(reused.preparations == 1)
+        #expect(
+            first.legacyResultFields.bestPower ==
+                repeated.legacyResultFields.bestPower
+        )
+
+        _ = try await worker.execute(
+            workUnit: scopedWorkUnit(
+                projectID: "b", datasetID: "shared", payload: payload
+            ),
+            datasetData: data
+        )
+        let otherProject = worker.preparedDatasetDebugState(
+            projectID: "b", datasetID: "shared"
+        )
+        #expect(otherProject.coordinateBuffer != initial.coordinateBuffer)
+
+        _ = try await worker.execute(
+            workUnit: scopedWorkUnit(
+                projectID: "b", datasetID: "different", payload: payload
+            ),
+            datasetData: data
+        )
+        #expect(worker.preparedDatasetDebugState(
+            projectID: "a", datasetID: "shared"
+        ).coordinateBuffer == nil)
+        #expect(otherProject.count == 2)
+
+        _ = try await worker.execute(
+            workUnit: scopedWorkUnit(
+                projectID: "a", datasetID: "shared", payload: payload
+            ),
+            datasetData: data
+        )
+        let rebuilt = worker.preparedDatasetDebugState(
+            projectID: "a", datasetID: "shared"
+        )
+        #expect(rebuilt.coordinateBuffer != initial.coordinateBuffer)
+        #expect(rebuilt.count == 2)
+        #expect(rebuilt.preparations == 4)
+    }
+
+    @Test func lombScargleExecutionStillHonorsCancellation() async throws {
+        let worker = try LombScargleWorker()
+        let task = Task {
+            try await worker.execute(
+                workUnit: scopedWorkUnit(
+                    projectID: "project",
+                    datasetID: "dataset",
+                    payload: .object([
+                        "startFrequency": .number(0.1),
+                        "frequencyStep": .number(0.01),
+                        "frequencyCount": .number(2)
+                    ])
+                ),
+                datasetData: Data(
+                    #"{"coordinates":[0,1],"values":[0,1]}"#.utf8
+                )
+            )
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+    }
+
     @Test func workloadRouterSelectsHandlerByExactID() async throws {
         let router = try WorkloadRouter(
             handlers: [
@@ -216,6 +316,34 @@ struct OpenStarTests {
         #expect(first != second)
         #expect(cached == first)
         #expect(recorder.paths.count == 2)
+    }
+
+    @MainActor
+    @Test func rawDatasetCacheEvictsLeastRecentlyUsedEntry() async throws {
+        let recorder = RequestRecorder { request in
+            (Data(request.url!.path.utf8), 200)
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(handlers: [])
+        )
+
+        for index in 0..<4 {
+            _ = try await manager.datasetData(
+                projectID: "project", datasetID: "dataset-\(index)"
+            )
+        }
+        _ = try await manager.datasetData(
+            projectID: "project", datasetID: "dataset-0"
+        )
+        _ = try await manager.datasetData(
+            projectID: "project", datasetID: "dataset-4"
+        )
+        _ = try await manager.datasetData(
+            projectID: "project", datasetID: "dataset-1"
+        )
+
+        #expect(recorder.paths.count == 6)
     }
 
     @MainActor
@@ -482,6 +610,24 @@ struct OpenStarTests {
             startFrequency: legacyStartFrequency,
             frequencyStep: 0.02,
             frequencyCount: 30
+        )
+    }
+
+    private func scopedWorkUnit(
+        projectID: String,
+        datasetID: String,
+        payload: JSONValue
+    ) -> WorkUnit {
+        WorkUnit(
+            id: UUID(),
+            projectID: projectID,
+            workloadID: LombScargleWorker.workloadID,
+            datasetID: datasetID,
+            payload: payload,
+            frequencyStartIndex: nil,
+            startFrequency: nil,
+            frequencyStep: nil,
+            frequencyCount: nil
         )
     }
 }

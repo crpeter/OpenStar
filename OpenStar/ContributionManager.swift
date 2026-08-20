@@ -50,6 +50,8 @@ final class ContributionManager {
     private let emptyClaimSleep: @Sendable (Duration) async throws -> Void
 
     private var datasets: [DatasetCacheKey: Data] = [:]
+    private var datasetRecency: [DatasetCacheKey] = []
+    private let datasetCacheCapacity = 4
     private var task: Task<Void, Never>?
     private var projectStatusTask: Task<Void, Never>?
 
@@ -439,6 +441,8 @@ final class ContributionManager {
         )
 
         if let cached = datasets[key] {
+            datasetRecency.removeAll { $0 == key }
+            datasetRecency.append(key)
             return cached
         }
 
@@ -451,7 +455,13 @@ final class ContributionManager {
             datasetID: datasetID
         )
 
+        if datasets.count == datasetCacheCapacity,
+           let oldest = datasetRecency.first {
+            datasets.removeValue(forKey: oldest)
+            datasetRecency.removeFirst()
+        }
         datasets[key] = downloaded
+        datasetRecency.append(key)
 
         print(
             "⭐️ [OpenStar] Dataset loaded: \(downloaded.count) bytes"
