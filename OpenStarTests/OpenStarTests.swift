@@ -237,7 +237,8 @@ struct OpenStarTests {
         }
         let manager = ContributionManager(
             coordinator: coordinatorClient(recorder: recorder),
-            workloadRouter: try WorkloadRouter(handlers: [])
+            workloadRouter: try WorkloadRouter(handlers: []),
+            projectStatusRefreshInterval: .milliseconds(20)
         )
 
         manager.start()
@@ -279,7 +280,8 @@ struct OpenStarTests {
         }
         let manager = ContributionManager(
             coordinator: coordinatorClient(recorder: recorder),
-            workloadRouter: try WorkloadRouter(handlers: [])
+            workloadRouter: try WorkloadRouter(handlers: []),
+            projectStatusRefreshInterval: .milliseconds(20)
         )
 
         manager.start()
@@ -304,6 +306,149 @@ struct OpenStarTests {
         #expect(manager.currentProject == "removed-project")
         #expect(manager.projectStatus?.projectID == "display")
         #expect(manager.isContributing)
+    }
+
+    @MainActor
+    @Test func acceptedResultClaimsNextUnitWithoutStatusOnHotPath() async throws {
+        let claims = LockedCounter()
+        let first = UUID()
+        let second = UUID()
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            case ("POST", "/v1/work/claim"):
+                let number = claims.increment()
+                guard number <= 2 else { return (Data(), 204) }
+                let id = number == 1 ? first : second
+                return (Self.workData(id: id), 200)
+            case ("POST", let path?) where path.hasSuffix("/result"):
+                return (Data(#"{"accepted":true,"message":"recorded"}"#.utf8), 200)
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(
+                handlers: [StubHandler(workloadID: "test")]
+            ),
+            projectStatusRefreshInterval: .seconds(60)
+        )
+
+        manager.start()
+        defer { manager.stop() }
+        try await waitUntil { manager.unitsAccepted == 2 }
+
+        let paths = recorder.paths
+        let firstResult = try #require(
+            paths.firstIndex(where: { $0.hasSuffix("/result") })
+        )
+        let nextClaim = try #require(
+            paths[(firstResult + 1)...].firstIndex(of: "/v1/work/claim")
+        )
+        #expect(
+            !paths[(firstResult + 1)..<nextClaim]
+                .contains(where: { $0.hasSuffix("/status") })
+        )
+    }
+
+    @MainActor
+    @Test func emptyClaimBackoffGrowsAndResetsAfterWork() async throws {
+        let claims = LockedCounter()
+        let sleeps = DurationRecorder()
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            case ("POST", "/v1/work/claim"):
+                switch claims.increment() {
+                case 1, 2, 4: return (Data(), 204)
+                case 3: return (Self.workData(id: UUID()), 200)
+                default: return (Data(), 204)
+                }
+            case ("POST", let path?) where path.hasSuffix("/result"):
+                return (Data(#"{"accepted":true,"message":"recorded"}"#.utf8), 200)
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(
+                handlers: [StubHandler(workloadID: "test")]
+            ),
+            emptyClaimSleep: { duration in
+                sleeps.append(duration)
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        )
+
+        manager.start()
+        defer { manager.stop() }
+        try await waitUntil { sleeps.values.count >= 3 }
+
+        #expect(Array(sleeps.values.prefix(3)) == [
+            .milliseconds(25), .milliseconds(50), .milliseconds(25)
+        ])
+    }
+
+    @MainActor
+    @Test func projectStatusRefreshesPeriodicallyAndStopCancelsPolling() async throws {
+        let recorder = RequestRecorder { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/nodes/register"):
+                return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
+            case ("GET", let path?) where path.hasSuffix("/status"):
+                return (Self.statusData, 200)
+            case ("POST", "/v1/work/claim"):
+                return (Data(), 204)
+            default:
+                return (Data(), 404)
+            }
+        }
+        let manager = ContributionManager(
+            coordinator: coordinatorClient(recorder: recorder),
+            workloadRouter: try WorkloadRouter(handlers: []),
+            projectStatusRefreshInterval: .milliseconds(20),
+            initialEmptyClaimBackoff: .seconds(5),
+            maximumEmptyClaimBackoff: .seconds(5)
+        )
+
+        manager.start()
+        try await waitUntil {
+            recorder.paths.filter { $0.hasSuffix("/status") }.count >= 2
+        }
+        #expect(manager.projectStatus?.projectID == "display")
+
+        manager.stop()
+        try await waitUntil { !manager.isContributing }
+        try await Task.sleep(for: .milliseconds(50))
+        let countAfterStop = recorder.paths.count
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(recorder.paths.count == countAfterStop)
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        for _ in 0..<100 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("Timed out waiting for worker state")
+    }
+
+    private static func workData(id: UUID) -> Data {
+        Data(
+            #"{"id":"\#(id.uuidString)","projectID":"project","workloadID":"test"}"#.utf8
+        )
     }
 
     private static let statusData = Data(
@@ -364,6 +509,31 @@ private final class RequestRecorder: @unchecked Sendable {
             )
         }
         return response(request)
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() -> Int {
+        lock.withLock {
+            value += 1
+            return value
+        }
+    }
+}
+
+private final class DurationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [Duration] = []
+
+    var values: [Duration] {
+        lock.withLock { recordedValues }
+    }
+
+    func append(_ duration: Duration) {
+        lock.withLock { recordedValues.append(duration) }
     }
 }
 
