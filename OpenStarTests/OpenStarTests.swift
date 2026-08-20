@@ -64,6 +64,70 @@ struct OpenStarTests {
         )
     }
 
+    @Test func impactingInteractivityIsEnvironmentUnavailable() {
+        let messages = [
+            "Impacting Interactivity",
+            "Metal command failed (kIOGPUCommandBufferCallbackErrorImpactingInteractivity)"
+        ]
+
+        for message in messages {
+            #expect(
+                LombScargleError.commandFailed(error(message)).workFailureKind ==
+                    .environmentUnavailable
+            )
+        }
+    }
+
+    @Test func backgroundMetalInterruptionsRemainEnvironmentUnavailable() {
+        let messages = [
+            "kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted",
+            "Cannot submit GPU work from background"
+        ]
+
+        for message in messages {
+            #expect(
+                LombScargleError.commandFailed(error(message)).workFailureKind ==
+                    .environmentUnavailable
+            )
+        }
+    }
+
+    @Test func unrelatedMetalCommandFailureRemainsExecutionFailure() {
+        #expect(
+            LombScargleError.commandFailed(
+                error("kIOGPUCommandBufferCallbackErrorPageFault")
+            ).workFailureKind == .execution
+        )
+        #expect(LombScargleError.commandFailed(nil).workFailureKind == .execution)
+    }
+
+    @Test func validationAndInvalidInputClassificationsRemainUnchanged() {
+        let validation = LombScargleValidation(
+            passed: false,
+            reason: "mismatch",
+            metalBestIndex: 1,
+            cpuBestLocalIndex: 2,
+            metalBestPower: 0.5,
+            cpuPowerAtMetalWinner: 0.4,
+            absolutePowerError: 0.1,
+            allowedPowerError: 0.01
+        )
+
+        #expect(
+            LombScargleError.validationFailed(validation).workFailureKind ==
+                .workloadValidation
+        )
+        #expect(LombScargleError.invalidDataset.workFailureKind == .invalidInput)
+        #expect(
+            LombScargleValidationError.invalidInput("bad input").workFailureKind ==
+                .invalidInput
+        )
+        #expect(
+            LombScargleValidationError.failed(validation).workFailureKind ==
+                .workloadValidation
+        )
+    }
+
     @Test func lombScargleUsesGenericPayload() throws {
         let unit = workUnit(
             payload: .object([
@@ -656,6 +720,14 @@ private final class RequestRecorder: @unchecked Sendable {
         }
         return response(request)
     }
+}
+
+private func error(_ description: String) -> NSError {
+    NSError(
+        domain: "OpenStarTests.Metal",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: description]
+    )
 }
 
 private final class LockedCounter: @unchecked Sendable {
