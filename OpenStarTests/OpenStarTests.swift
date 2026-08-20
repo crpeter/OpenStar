@@ -537,6 +537,7 @@ struct OpenStarTests {
 
     @Test func lombScargleExecutionStillHonorsCancellation() async throws {
         let worker = try LombScargleWorker()
+
         let task = Task {
             try await worker.execute(
                 workUnit: scopedWorkUnit(
@@ -553,9 +554,20 @@ struct OpenStarTests {
                 )
             )
         }
+
         task.cancel()
-        await #expect(throws: CancellationError.self) {
-            try await task.value
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected cancelled Lomb-Scargle execution to fail")
+        } catch {
+            #expect(
+                error is CancellationError ||
+                error is WorkloadCancellation
+            )
+            #expect(
+                classifyWorkFailure(error) == .environmentUnavailable
+            )
         }
     }
 
@@ -1247,8 +1259,13 @@ private final class RequestRecorder: @unchecked Sendable {
     }
 
     func handle(_ request: URLRequest) -> (Data, Int) {
+        let body = bodyData(from: request)
+
         lock.withLock {
-            if let body = request.httpBody { recordedBodies.append(body) }
+            if let body {
+                recordedBodies.append(body)
+            }
+
             recordedPaths.append(
                 URLComponents(
                     url: request.url!,
@@ -1256,7 +1273,49 @@ private final class RequestRecorder: @unchecked Sendable {
                 )!.percentEncodedPath
             )
         }
+
         return response(request)
+    }
+
+    private func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+
+        while true {
+            let count = buffer.withUnsafeMutableBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else {
+                    return 0
+                }
+
+                return stream.read(
+                    baseAddress,
+                    maxLength: buffer.count
+                )
+            }
+
+            if count < 0 {
+                return nil
+            }
+
+            if count == 0 {
+                break
+            }
+
+            data.append(contentsOf: buffer[..<count])
+        }
+
+        return data
     }
 }
 
