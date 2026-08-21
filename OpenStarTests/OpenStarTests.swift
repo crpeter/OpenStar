@@ -62,8 +62,8 @@ struct OpenStarTests {
         #expect(validation.metalBestIndex == 1)
         #expect(validation.cpuBestLocalIndex == 1)
         #expect(validation.metalBestPower == expected)
-        #expect(validation.cpuPowerAtMetalWinner == expected)
-        #expect(validation.absolutePowerError == 0)
+        #expect(abs(validation.cpuPowerAtMetalWinner - expected) < 1e-12)
+        #expect(validation.absolutePowerError < 1e-12)
         #expect(validation.allowedPowerError == max(5e-5, abs(expected) * 0.01))
 
         let beginning = try LombScargleCPUValidator.validate(
@@ -96,6 +96,63 @@ struct OpenStarTests {
         )
         #expect(!nonMaximum.passed)
         #expect(nonMaximum.reason.contains("is not a local maximum"))
+    }
+
+    @Test func acceleratedLombScargleMatchesScalarReferenceAcrossDatasets() throws {
+        let cases: [(coordinates: [Double], values: [Double], start: Float, step: Float)] = [
+            ((0..<8).map { Double($0) * 0.25 },
+             (0..<8).map { sin(2 * .pi * 0.4 * Double($0) * 0.25) }, 0.1, 0.07),
+            ([0, 0.03, 0.41, 1.7, 1.71, 3.2, 5.9],
+             [-2.1, 0.3, 1.7, -0.8, 0.02, 2.4, -1.3], 0.031, 0.113),
+            ((0..<257).map { pow(Double($0 + 1), 1.17) * 0.002 },
+             (0..<257).map { index in
+                 sin(Double(index) * 0.19) - 0.35 * cos(Double(index) * 0.071)
+             }, 0.23, 0.0043)
+        ]
+
+        for item in cases {
+            let total = item.values.reduce(0) { $0 + $1 * $1 }
+            let dataset = LombScargleValidationDataset(
+                coordinates: item.coordinates,
+                values: item.values,
+                totalValueSquared: total
+            )
+            for winner in [0, 3, 6] {
+                let scalarSeed = try LombScargleCPUValidator.validateScalarReference(
+                    dataset: dataset, metalBestIndex: winner, metalBestPower: 0,
+                    startFrequency: item.start, frequencyStep: item.step,
+                    frequencyCount: 7
+                )
+                let metalPower = scalarSeed.cpuPowerAtMetalWinner
+                let scalar = try LombScargleCPUValidator.validateScalarReference(
+                    dataset: dataset, metalBestIndex: winner,
+                    metalBestPower: metalPower, startFrequency: item.start,
+                    frequencyStep: item.step, frequencyCount: 7
+                )
+                let accelerated = try LombScargleCPUValidator.validate(
+                    dataset: dataset, metalBestIndex: winner,
+                    metalBestPower: metalPower, startFrequency: item.start,
+                    frequencyStep: item.step, frequencyCount: 7
+                )
+
+                #expect(abs(accelerated.cpuPowerAtMetalWinner
+                    - scalar.cpuPowerAtMetalWinner) < 2e-12)
+                #expect(accelerated.passed == scalar.passed)
+                #expect(accelerated.reason == scalar.reason)
+                #expect(accelerated.metalBestIndex == scalar.metalBestIndex)
+                #expect(accelerated.cpuBestLocalIndex == scalar.cpuBestLocalIndex)
+                #expect(abs(accelerated.allowedPowerError
+                    - scalar.allowedPowerError) < 2e-14)
+
+                let incorrect = try LombScargleCPUValidator.validate(
+                    dataset: dataset, metalBestIndex: winner,
+                    metalBestPower: metalPower + 1, startFrequency: item.start,
+                    frequencyStep: item.step, frequencyCount: 7
+                )
+                #expect(!incorrect.passed)
+                #expect(incorrect.reason.contains("GPU power"))
+            }
+        }
     }
 
     @Test func adaptiveBatchControllerLearnsWithHysteresisAndBounds() {
