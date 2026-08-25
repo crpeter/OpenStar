@@ -245,7 +245,9 @@ final class ContributionManager {
                         }
                     }
 
-                    var firstSubmissionError: (any Error)?
+                    var submissionResults: [WorkResult] = []
+                    submissionResults.reserveCapacity(members.count)
+
                     for member in members {
                         currentWorkUnitID = member.workUnit.id
                         let result: WorkResult
@@ -275,19 +277,33 @@ final class ContributionManager {
                                 bestPower: nil
                             )
                         }
-                        isSubmitting = true
-                        do {
-                            let receipt = try await submitWithRetry(result: result)
+                        submissionResults.append(result)
+                    }
+
+                    isSubmitting = true
+                    let coordinator = coordinator
+                    let submissionOutcomes = await Task.detached {
+                        await WorkResultSubmitter.submit(
+                            results: submissionResults,
+                            coordinator: coordinator
+                        )
+                    }.value
+                    isSubmitting = false
+
+                    var firstSubmissionError: WorkResultSubmissionFailure?
+                    for outcome in submissionOutcomes {
+                        currentWorkUnitID = submissionResults[outcome.index].workUnitID
+                        if let receipt = outcome.receipt {
                             if receipt.accepted {
                                 unitsAccepted += 1
                                 backgroundTask?.recordAcceptedWork(
                                     unitsAccepted: unitsAccepted - backgroundSessionInitialAcceptedCount
                                 )
                             }
-                        } catch {
-                            if firstSubmissionError == nil { firstSubmissionError = error }
+                        } else if let failure = outcome.failure,
+                                  firstSubmissionError == nil {
+                            firstSubmissionError = failure
                         }
-                        isSubmitting = false
                     }
                     if let firstSubmissionError { throw firstSubmissionError }
                     currentWorkUnitID = nil
