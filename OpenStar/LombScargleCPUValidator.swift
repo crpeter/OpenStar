@@ -53,11 +53,17 @@ final class LombScargleValidationDataset: @unchecked Sendable {
     let coordinates: [Double]
     let values: [Double]
     let totalValueSquared: Double
+    let coordinatesAreFinite: Bool
+    let valuesAreFinite: Bool
+    let normalizationIsValid: Bool
 
     init(coordinates: [Double], values: [Double], totalValueSquared: Double) {
         self.coordinates = coordinates
         self.values = values
         self.totalValueSquared = totalValueSquared
+        coordinatesAreFinite = coordinates.allSatisfy(\.isFinite)
+        valuesAreFinite = values.allSatisfy(\.isFinite)
+        normalizationIsValid = totalValueSquared.isFinite && totalValueSquared > 0
     }
 }
 
@@ -192,13 +198,13 @@ enum LombScargleCPUValidator {
             )
         }
 
-        guard dataset.coordinates.allSatisfy(\.isFinite) else {
+        guard dataset.coordinatesAreFinite else {
             throw LombScargleValidationError.invalidInput(
                 "coordinate sample is not finite"
             )
         }
 
-        guard dataset.values.allSatisfy(\.isFinite) else {
+        guard dataset.valuesAreFinite else {
             throw LombScargleValidationError.invalidInput(
                 "value sample is not finite"
             )
@@ -304,6 +310,9 @@ enum LombScargleCPUValidator {
         )
     }
 
+    /// Computes the exact validator formula from one vectorized sin/cos sweep.
+    /// The tau terms are recovered from the double-angle identities and the
+    /// shifted basis is obtained by rotating the unshifted dot products.
     private static func powerMatchingMetalFormula(
         dataset: LombScargleValidationDataset,
         frequency: Double,
@@ -316,44 +325,51 @@ enum LombScargleCPUValidator {
             )
         }
 
-        let twoPi = 2.0 * Double.pi
-        let omega = twoPi * frequency
-
+        let omega = 2.0 * Double.pi * frequency
         let count = vDSP_Length(dataset.coordinates.count)
         var trigCount = Int32(dataset.coordinates.count)
-        var angleScale = 2.0 * omega
+        var angleScale = omega
+
         vDSP_vsmulD(dataset.coordinates, 1, &angleScale, &scratch.angles, 1, count)
         vvsincos(&scratch.sines, &scratch.cosines, scratch.angles, &trigCount)
 
-        var sumSin2 = 0.0
-        var sumCos2 = 0.0
-        vDSP_sveD(scratch.sines, 1, &sumSin2, count)
-        vDSP_sveD(scratch.cosines, 1, &sumCos2, count)
+        var baseSinSquared = 0.0
+        var baseCosSquared = 0.0
+        var baseSinCos = 0.0
+        var baseYSin = 0.0
+        var baseYCos = 0.0
 
-        let tau = atan2(
-            sumSin2,
-            sumCos2
-        ) / (2.0 * omega)
+        vDSP_svesqD(scratch.sines, 1, &baseSinSquared, count)
+        vDSP_svesqD(scratch.cosines, 1, &baseCosSquared, count)
+        vDSP_dotprD(scratch.sines, 1, scratch.cosines, 1, &baseSinCos, count)
+        vDSP_dotprD(dataset.values, 1, scratch.sines, 1, &baseYSin, count)
+        vDSP_dotprD(dataset.values, 1, scratch.cosines, 1, &baseYCos, count)
 
-        angleScale = omega
-        var angleOffset = -omega * tau
-        vDSP_vsmulD(dataset.coordinates, 1, &angleScale, &scratch.angles, 1, count)
-        vDSP_vsaddD(scratch.angles, 1, &angleOffset, &scratch.angles, 1, count)
-        vvsincos(&scratch.sines, &scratch.cosines, scratch.angles, &trigCount)
+        let sumSin2 = 2.0 * baseSinCos
+        let sumCos2 = baseCosSquared - baseSinSquared
+        let tau = atan2(sumSin2, sumCos2) / (2.0 * omega)
 
-        var sumYCos = 0.0
-        var sumYSin = 0.0
-        var sumCosSquared = 0.0
-        var sumSinSquared = 0.0
-        vDSP_dotprD(dataset.values, 1, scratch.cosines, 1, &sumYCos, count)
-        vDSP_dotprD(dataset.values, 1, scratch.sines, 1, &sumYSin, count)
-        vDSP_svesqD(scratch.cosines, 1, &sumCosSquared, count)
-        vDSP_svesqD(scratch.sines, 1, &sumSinSquared, count)
+        let phase = omega * tau
+        let phaseSin = sin(phase)
+        let phaseCos = cos(phase)
+        let phaseSinSquared = phaseSin * phaseSin
+        let phaseCosSquared = phaseCos * phaseCos
+        let rotatedCross = 2.0 * phaseSin * phaseCos * baseSinCos
+
+        let sumYCos = phaseCos * baseYCos + phaseSin * baseYSin
+        let sumYSin = phaseCos * baseYSin - phaseSin * baseYCos
+        let sumCosSquared =
+            phaseCosSquared * baseCosSquared
+            + phaseSinSquared * baseSinSquared
+            + rotatedCross
+        let sumSinSquared =
+            phaseCosSquared * baseSinSquared
+            + phaseSinSquared * baseCosSquared
+            - rotatedCross
 
         guard sumCosSquared > 0,
               sumSinSquared > 0,
-              dataset.totalValueSquared.isFinite,
-              dataset.totalValueSquared > 0 else {
+              dataset.normalizationIsValid else {
             throw LombScargleValidationError.invalidInput(
                 "degenerate Lomb-Scargle normalization"
             )
@@ -410,7 +426,7 @@ enum LombScargleCPUValidator {
             sumSinSquared += sine * sine
         }
         guard sumCosSquared > 0, sumSinSquared > 0,
-              dataset.totalValueSquared.isFinite, dataset.totalValueSquared > 0 else {
+              dataset.normalizationIsValid else {
             throw LombScargleValidationError.invalidInput(
                 "degenerate Lomb-Scargle normalization"
             )
