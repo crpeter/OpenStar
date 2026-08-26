@@ -1,3 +1,6 @@
 
 # Local fleet deployment helper
 deploy-fleet.sh
+
+# Xcode user-specific state
+xcuserdata/
