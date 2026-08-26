@@ -71,7 +71,7 @@ final class ContributionManager {
 
     private var datasets: [DatasetCacheKey: Data] = [:]
     private var datasetRecency: [DatasetCacheKey] = []
-    private let datasetCacheCapacity = 4
+    private let datasetCacheCapacity: Int
     private var task: Task<Void, Never>?
     private var projectStatusTask: Task<Void, Never>?
     private var backgroundTask: BackgroundContributionTask?
@@ -86,6 +86,7 @@ final class ContributionManager {
         maximumEmptyClaimBackoff = .milliseconds(500)
         emptyClaimSleep = { try await Task.sleep(for: $0) }
         backgroundSession = BackgroundContributionSession.shared
+        datasetCacheCapacity = 32
 
         do {
             workloadRouter = try WorkloadRouter()
@@ -106,7 +107,8 @@ final class ContributionManager {
             try await Task.sleep(for: $0)
         },
         backgroundSession: BackgroundContributionSessionSupporting =
-            BackgroundContributionSession.shared
+            BackgroundContributionSession.shared,
+        datasetCacheCapacity: Int = 4
     ) {
         self.nodeID = nodeID
         self.coordinator = coordinator
@@ -116,6 +118,7 @@ final class ContributionManager {
         self.maximumEmptyClaimBackoff = maximumEmptyClaimBackoff
         self.emptyClaimSleep = emptyClaimSleep
         self.backgroundSession = backgroundSession
+        self.datasetCacheCapacity = max(1, datasetCacheCapacity)
     }
 
     var statusText: String {
