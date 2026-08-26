@@ -285,12 +285,10 @@ final class ContributionManager {
 
                     isSubmitting = true
                     let coordinator = coordinator
-                    let submissionOutcomes = await Task.detached {
-                        await WorkResultSubmitter.submit(
-                            results: submissionResults,
-                            coordinator: coordinator
-                        )
-                    }.value
+                    let submissionOutcomes = await WorkResultSubmitter.submit(
+                        results: submissionResults,
+                        coordinator: coordinator
+                    )
                     isSubmitting = false
 
                     var firstSubmissionError: WorkResultSubmissionFailure?
