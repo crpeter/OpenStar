@@ -404,17 +404,19 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                 )
                 let preparationDuration = ProcessInfo.processInfo.systemUptime
                     - preparationStarted
+
+                let metalCallStarted = ProcessInfo.processInfo.systemUptime
                 let metal = try runMetalPowersSynchronously(
                     payloads: group.payloads, dataset: dataset
                 )
+                let metalCallDuration = ProcessInfo.processInfo.systemUptime
+                    - metalCallStarted
                 let next = batchController.observe(metalDuration: metal.duration)
-                print(
-                    "⭐️ [OpenStar] Metal batch units=\(group.units.count) "
-                    + "frequencies=\(group.payloads.reduce(0) { $0 + $1.frequencyCount }) "
-                    + String(format: "duration=%.4fs nextBatch=%d", metal.duration, next)
-                )
 
                 var offset = 0
+                var sliceDuration = 0.0
+                var reductionDuration = 0.0
+                var validationWallDuration = 0.0
                 let childMetalDurations = Self.allocatedDurations(
                     total: metal.duration,
                     frequencyCounts: group.payloads.map(\.frequencyCount)
@@ -424,20 +426,69 @@ final class LombScargleWorker: OpenStarBatchWorkloadHandler, @unchecked Sendable
                     zip(group.units, group.payloads), childMetalDurations
                 ) {
                     do {
-                        let slice = Array(metal.powers[offset..<(offset + payload.frequencyCount)])
+                        let sliceStarted = ProcessInfo.processInfo.systemUptime
+                        let slice = Array(
+                            metal.powers[offset..<(offset + payload.frequencyCount)]
+                        )
+                        sliceDuration += ProcessInfo.processInfo.systemUptime
+                            - sliceStarted
+
+                        let reductionStarted = ProcessInfo.processInfo.systemUptime
                         let numerical = try Self.reduce(
                             powers: slice, payload: payload,
                             metalDuration: childMetalDuration
                         )
+                        reductionDuration += ProcessInfo.processInfo.systemUptime
+                            - reductionStarted
+
+                        let validationStarted = ProcessInfo.processInfo.systemUptime
                         validated[unit.id] = try validate(
                             numerical: numerical, payload: payload, dataset: dataset
                         )
+                        validationWallDuration += ProcessInfo.processInfo.systemUptime
+                            - validationStarted
                     } catch {
                         outcomes[unit.id] = .failure(error)
                     }
                     offset += payload.frequencyCount
                 }
                 let groupDuration = ProcessInfo.processInfo.systemUptime - groupStarted
+                let residualDuration = max(
+                    0,
+                    groupDuration
+                        - preparationDuration
+                        - metalCallDuration
+                        - sliceDuration
+                        - reductionDuration
+                        - validationWallDuration
+                )
+                let metalHostDuration = max(0, metalCallDuration - metal.duration)
+                let frequencies = group.payloads.reduce(0) {
+                    $0 + $1.frequencyCount
+                }
+                print(
+                    "⭐️ [OpenStar] PROFILE "
+                    + "units=\(group.units.count) frequencies=\(frequencies) "
+                    + String(
+                        format: (
+                            "group=%.3fms prep=%.3fms metalCall=%.3fms "
+                            + "metalWait=%.3fms metalHost=%.3fms slice=%.3fms "
+                            + "reduce=%.3fms validate=%.3fms residual=%.3fms "
+                            + "nextBatch=%d"
+                        ),
+                        groupDuration * 1_000,
+                        preparationDuration * 1_000,
+                        metalCallDuration * 1_000,
+                        metal.duration * 1_000,
+                        metalHostDuration * 1_000,
+                        sliceDuration * 1_000,
+                        reductionDuration * 1_000,
+                        validationWallDuration * 1_000,
+                        residualDuration * 1_000,
+                        next
+                    )
+                )
+
                 let counts = group.payloads.map(\.frequencyCount)
                 let childTotalDurations = Self.allocatedDurations(
                     total: groupDuration, frequencyCounts: counts
