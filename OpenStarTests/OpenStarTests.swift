@@ -64,8 +64,11 @@ struct OpenStarTests {
         #expect(validation.metalBestPower == expected)
         #expect(abs(validation.cpuPowerAtMetalWinner - expected) < 1e-12)
         #expect(validation.absolutePowerError < 1e-12)
-        #expect(validation.allowedPowerError == max(5e-5, abs(expected) * 0.01))
-
+        let expectedAllowedPowerError = max(5e-5, abs(expected) * 0.01)
+        #expect(
+            abs(validation.allowedPowerError - expectedAllowedPowerError) < 2e-14
+        )
+        
         let beginning = try LombScargleCPUValidator.validate(
             dataset: dataset, metalBestIndex: 0,
             metalBestPower: referenceLombScarglePower(
