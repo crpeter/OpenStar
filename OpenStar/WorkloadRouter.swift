@@ -139,7 +139,8 @@ final class WorkloadRouter: @unchecked Sendable {
 
     convenience init() throws {
         try self.init(handlers: [
-            try LombScargleWorker(preparedDatasetCacheCapacity: 32)
+            try LombScargleWorker(preparedDatasetCacheCapacity: 32),
+            BoxPeriodSearchWorker()
         ])
     }
 
