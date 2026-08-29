@@ -1195,6 +1195,7 @@ struct OpenStarTests {
     @MainActor
     @Test func acceptedResultClaimsNextUnitWithoutStatusOnHotPath() async throws {
         let claims = LockedCounter()
+        let statuses = LockedCounter()
         let first = UUID()
         let second = UUID()
         let recorder = RequestRecorder { request in
@@ -1202,10 +1203,18 @@ struct OpenStarTests {
             case ("POST", "/v1/nodes/register"):
                 return (Data(#"{"accepted":true,"message":"ok"}"#.utf8), 200)
             case ("GET", let path?) where path.hasSuffix("/status"):
+                _ = statuses.increment()
                 return (Self.statusData, 200)
             case ("POST", "/v1/work/claim"):
+                guard statuses.current > 0 else {
+                    return (Data(), 204)
+                }
+
                 let number = claims.increment()
-                guard number <= 2 else { return (Data(), 204) }
+                guard number <= 2 else {
+                    return (Data(), 204)
+                }
+
                 let id = number == 1 ? first : second
                 return (Self.workData(id: id), 200)
             case ("POST", let path?) where path.hasSuffix("/result"):
@@ -1656,6 +1665,10 @@ private func error(_ description: String) -> NSError {
 private final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
+    
+    var current: Int {
+        lock.withLock { value }
+    }
 
     func increment() -> Int {
         lock.withLock {
