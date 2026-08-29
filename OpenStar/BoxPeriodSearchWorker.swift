@@ -207,7 +207,9 @@ final class BoxPeriodSearchWorker: OpenStarBatchWorkloadHandler, @unchecked Send
         }
         var best: Candidate?
         for frequencyIndex in 0..<payload.frequencyCount {
-            if Task<Void, Never>.isCancelled { throw WorkloadCancellation() }
+            if Task.isCancelled {
+                throw WorkloadCancellation()
+            }
             let frequency = payload.startFrequency + Float(frequencyIndex) * payload.frequencyStep
             var sums = [Float](repeating: 0, count: payload.phaseBinCount)
             var counts = [Int](repeating: 0, count: payload.phaseBinCount)
