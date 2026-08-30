@@ -27,7 +27,12 @@ struct CurveGridWorkloadTests {
         #expect(
             router.supportedCapabilities.contains(worker.capabilities[0])
         )
-        #expect(router.desiredBatchCount == 8)
+
+        let compatibleBatchRouter = try WorkloadRouter(handlers: [
+            BoxPeriodSearchWorker(),
+            worker,
+        ])
+        #expect(compatibleBatchRouter.desiredBatchCount == 8)
     }
 
     @Test
