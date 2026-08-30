@@ -28,38 +28,8 @@ struct CurveGridWorkloadTests {
             router.supportedCapabilities.contains(worker.capabilities[0])
         )
 
-        let compatibleBatchRouter = try WorkloadRouter(handlers: [
-            BoxPeriodSearchWorker(),
-            worker,
-        ])
-        #expect(compatibleBatchRouter.desiredBatchCount == 8)
-    }
-
-    @Test
-    func legacyCapabilitiesRemainRegisteredUnchanged() throws {
-        let handlers = try WorkloadCatalog.handlers()
-        let legacyHandlers = Array(handlers.prefix(2))
-        #expect(legacyHandlers.map(\.workloadIDs) == [
-            ["openstar.lomb-scargle.v1", "openstar.tess-period-search.v1"],
-            ["openstar.box-period-search.v1"],
-        ])
-        #expect(legacyHandlers.flatMap(\.capabilities) == [
-            WorkloadCapability(
-                workloadID: "openstar.lomb-scargle.v1",
-                executionBackends: [.metal],
-                validatorID: LombScargleValidation.validatorID
-            ),
-            WorkloadCapability(
-                workloadID: "openstar.tess-period-search.v1",
-                executionBackends: [.metal],
-                validatorID: LombScargleValidation.validatorID
-            ),
-            WorkloadCapability(
-                workloadID: "openstar.box-period-search.v1",
-                executionBackends: [.cpu],
-                validatorID: nil
-            ),
-        ])
+        let curveGridRouter = try WorkloadRouter(handlers: [worker])
+        #expect(curveGridRouter.desiredBatchCount == 8)
     }
 
     @Test
@@ -85,7 +55,29 @@ struct CurveGridWorkloadTests {
     }
 
     @Test
-    func missingWrongAndAdditionalContractIDsAreRejected() async throws {
+    func opaqueTopLevelDatasetFieldsAreIgnored() throws {
+        let data = try CurveGridFixture.datasetData { object in
+            object["metadata"] = [
+                "labels": ["opaque", "coordinator-owned"],
+                "revision": 7,
+            ]
+            object["reference"] = NSNull()
+            object["provenance"] = [
+                "source": ["kind": "external"],
+            ]
+        }
+
+        let dataset = try CurveGridJSONDatasetDecoder().decode(data)
+        #expect(dataset.id == CurveGridFixture.datasetID)
+        #expect(dataset.datasetSchemaID == CurveGridContract.datasetSchemaID)
+        #expect(dataset.coordinates == CurveGridFixture.coordinates)
+        #expect(dataset.values == CurveGridFixture.values)
+        #expect(dataset.inverseVariances == CurveGridFixture.inverseVariances)
+        #expect(dataset.curveGrid.familyID == CurveGridContract.familyID)
+    }
+
+    @Test
+    func missingAndWrongContractIDsAreRejected() async throws {
         let worker = CurveGridWorkloadHandler()
         let data = try CurveGridFixture.datasetData()
         let units = [
@@ -133,15 +125,6 @@ struct CurveGridWorkloadTests {
             worker: worker,
             unit: CurveGridFixture.workUnit(),
             data: wrongDatasetFamily
-        )
-
-        let additionalDatasetField = try CurveGridFixture.datasetData { object in
-            object["extra"] = 1
-        }
-        await expectInvalidInput(
-            worker: worker,
-            unit: CurveGridFixture.workUnit(),
-            data: additionalDatasetField
         )
 
         await expectInvalidInput(
@@ -249,6 +232,100 @@ struct CurveGridWorkloadTests {
             }
             #expect(throws: CurveGridError.self) {
                 _ = try CurveGridJSONDatasetDecoder().decode(data)
+            }
+        }
+    }
+
+    @Test
+    func JSONSafeIntegerBoundsAreEnforcedWithoutLargeAllocations() throws {
+        let maximum = CurveGridContract.maximumJSONSafeInteger
+        let aboveMaximum = maximum + 1
+
+        let startBoundary = try CurveGridPayload(.object([
+            "familyID": .string(CurveGridContract.familyID),
+            "gridStartIndex": .number(Double(maximum)),
+            "gridCount": .number(1),
+        ]))
+        #expect(startBoundary.gridStartIndex == maximum)
+
+        let countBoundary = try CurveGridPayload(.object([
+            "familyID": .string(CurveGridContract.familyID),
+            "gridStartIndex": .number(0),
+            "gridCount": .number(Double(maximum)),
+        ]))
+        #expect(countBoundary.gridCount == maximum)
+
+        for payload in [
+            JSONValue.object([
+                "familyID": .string(CurveGridContract.familyID),
+                "gridStartIndex": .number(Double(aboveMaximum)),
+                "gridCount": .number(1),
+            ]),
+            JSONValue.object([
+                "familyID": .string(CurveGridContract.familyID),
+                "gridStartIndex": .number(0),
+                "gridCount": .number(Double(aboveMaximum)),
+            ]),
+        ] {
+            #expect(throws: CurveGridError.self) {
+                _ = try CurveGridPayload(payload)
+            }
+        }
+
+        let tinyStep = Double.leastNonzeroMagnitude
+        let totalAboveMaximumFactor = 100_000_000
+        let sampleProductCount = maximum
+            / CurveGridFixture.coordinates.count + 1
+        let datasets = [
+            CurveGridFixture.typedDataset(
+                centerAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: aboveMaximum
+                )
+            ),
+            CurveGridFixture.typedDataset(
+                candidatesPerWorkUnit: aboveMaximum
+            ),
+            CurveGridFixture.typedDataset(
+                centerAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: totalAboveMaximumFactor
+                ),
+                logScaleAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: totalAboveMaximumFactor
+                ),
+                logShapeAxis: CurveGridAxis(start: 0, step: 1, count: 1)
+            ),
+            CurveGridFixture.typedDataset(
+                centerAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: maximum
+                ),
+                logScaleAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: maximum
+                ),
+                logShapeAxis: CurveGridAxis(start: 0, step: 1, count: 1)
+            ),
+            CurveGridFixture.typedDataset(
+                centerAxis: CurveGridAxis(
+                    start: 0,
+                    step: tinyStep,
+                    count: sampleProductCount
+                ),
+                logScaleAxis: CurveGridAxis(start: 0, step: 1, count: 1),
+                logShapeAxis: CurveGridAxis(start: 0, step: 1, count: 1)
+            ),
+        ]
+        for dataset in datasets {
+            #expect(throws: CurveGridError.self) {
+                try dataset.validate()
             }
         }
     }

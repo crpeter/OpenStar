@@ -9,6 +9,7 @@ enum CurveGridContract {
     static let familyID =
         "openstar.curve-family.symmetric-radial-amplification.v1"
     static let validatorID = "openstar.curve-grid.local-double.v1"
+    static let maximumJSONSafeInteger = 9_007_199_254_740_991
 }
 
 nonisolated
@@ -94,12 +95,28 @@ struct CurveGridDefinition: Decodable, Sendable, Equatable {
                 "axis counts must be positive integers"
             )
         }
+        guard centerAxis.count <= CurveGridContract.maximumJSONSafeInteger,
+              logScaleAxis.count <= CurveGridContract.maximumJSONSafeInteger,
+              logShapeAxis.count
+                <= CurveGridContract.maximumJSONSafeInteger else {
+            throw CurveGridError.invalidDataset(
+                "axis counts exceed the JSON-safe integer limit"
+            )
+        }
         let (centerScaleCount, firstOverflow) = centerAxis.count
             .multipliedReportingOverflow(by: logScaleAxis.count)
+        guard !firstOverflow else {
+            throw CurveGridError.invalidDataset("grid size overflows")
+        }
         let (totalCount, secondOverflow) = centerScaleCount
             .multipliedReportingOverflow(by: logShapeAxis.count)
-        guard !firstOverflow, !secondOverflow, totalCount > 0 else {
+        guard !secondOverflow, totalCount > 0 else {
             throw CurveGridError.invalidDataset("grid size overflows")
+        }
+        guard totalCount <= CurveGridContract.maximumJSONSafeInteger else {
+            throw CurveGridError.invalidDataset(
+                "grid size exceeds the JSON-safe integer limit"
+            )
         }
         return totalCount
     }
@@ -154,21 +171,34 @@ struct CurveGridDataset: Decodable, Sendable, Equatable {
         try Self.validateAxis(curveGrid.centerAxis, exponentiated: false)
         try Self.validateAxis(curveGrid.logScaleAxis, exponentiated: true)
         try Self.validateAxis(curveGrid.logShapeAxis, exponentiated: true)
-        guard curveGrid.candidatesPerWorkUnit > 0 else {
+        guard curveGrid.candidatesPerWorkUnit > 0,
+              curveGrid.candidatesPerWorkUnit
+                <= CurveGridContract.maximumJSONSafeInteger else {
             throw CurveGridError.invalidDataset(
-                "candidatesPerWorkUnit must be a positive integer"
+                "candidatesPerWorkUnit must be a positive JSON-safe integer"
             )
         }
-        _ = try curveGrid.totalCandidateCount()
+        let totalCandidateCount = try curveGrid.totalCandidateCount()
+        let (sampleCandidateCount, overflow) = coordinates.count
+            .multipliedReportingOverflow(by: totalCandidateCount)
+        guard !overflow,
+              sampleCandidateCount
+                <= CurveGridContract.maximumJSONSafeInteger else {
+            throw CurveGridError.invalidDataset(
+                "sample and candidate count product exceeds the "
+                    + "JSON-safe integer limit"
+            )
+        }
     }
 
     private static func validateAxis(
         _ axis: CurveGridAxis,
         exponentiated: Bool
     ) throws {
-        guard axis.count > 0 else {
+        guard axis.count > 0,
+              axis.count <= CurveGridContract.maximumJSONSafeInteger else {
             throw CurveGridError.invalidDataset(
-                "axis count must be a positive integer"
+                "axis count must be a positive JSON-safe integer"
             )
         }
         guard axis.start.isFinite, axis.step.isFinite else {
@@ -218,15 +248,18 @@ struct CurveGridPayload: Sendable, Equatable {
             throw CurveGridError.invalidWorkUnit("familyID must be a string")
         }
         guard let gridStartIndex = object["gridStartIndex"]?.intValue,
-              gridStartIndex >= 0 else {
+              gridStartIndex >= 0,
+              gridStartIndex
+                <= CurveGridContract.maximumJSONSafeInteger else {
             throw CurveGridError.invalidWorkUnit(
-                "gridStartIndex must be a nonnegative integer"
+                "gridStartIndex must be a nonnegative JSON-safe integer"
             )
         }
         guard let gridCount = object["gridCount"]?.intValue,
-              gridCount > 0 else {
+              gridCount > 0,
+              gridCount <= CurveGridContract.maximumJSONSafeInteger else {
             throw CurveGridError.invalidWorkUnit(
-                "gridCount must be a positive integer"
+                "gridCount must be a positive JSON-safe integer"
             )
         }
         guard familyID == CurveGridContract.familyID else {
@@ -807,9 +840,11 @@ final class CurveGridWorkloadHandler:
             duration: duration,
             payload: .object([
                 "familyID": .string(CurveGridContract.familyID),
-                "gridStartIndex": .number(Double(payload.gridStartIndex)),
-                "gridCount": .number(Double(payload.gridCount)),
-                "bestGridIndex": .number(Double(best.gridIndex)),
+                "gridStartIndex": try Self.jsonSafeNumber(
+                    payload.gridStartIndex
+                ),
+                "gridCount": try Self.jsonSafeNumber(payload.gridCount),
+                "bestGridIndex": try Self.jsonSafeNumber(best.gridIndex),
                 "bestCenter": .number(best.center),
                 "bestLogScale": .number(best.logScale),
                 "bestLogShape": .number(best.logShape),
@@ -818,11 +853,11 @@ final class CurveGridWorkloadHandler:
                 "bestWeightedResidualSumSquares": .number(
                     best.weightedResidualSumSquares
                 ),
-                "evaluatedCandidateCount": .number(
-                    Double(result.evaluatedCandidateCount)
+                "evaluatedCandidateCount": try Self.jsonSafeNumber(
+                    result.evaluatedCandidateCount
                 ),
-                "invalidCandidateCount": .number(
-                    Double(result.invalidCandidateCount)
+                "invalidCandidateCount": try Self.jsonSafeNumber(
+                    result.invalidCandidateCount
                 ),
             ]),
             summary: WorkloadResultSummary(
@@ -845,6 +880,16 @@ final class CurveGridWorkloadHandler:
             ),
             legacyResultFields: .none
         )
+    }
+
+    private static func jsonSafeNumber(_ value: Int) throws -> JSONValue {
+        guard value >= 0,
+              value <= CurveGridContract.maximumJSONSafeInteger else {
+            throw CurveGridError.validationFailed(
+                "result integer exceeds the JSON-safe integer limit"
+            )
+        }
+        return .number(Double(value))
     }
 
     private func validate(
@@ -954,14 +999,6 @@ extension CurveGridDefinition {
 extension CurveGridDataset {
     nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CurveGridCodingKey.self)
-        try curveGridRequireExactKeys(container, [
-            "id",
-            "datasetSchemaID",
-            "coordinates",
-            "values",
-            "inverseVariances",
-            "curveGrid",
-        ])
         id = try container.decode(String.self, forKey: CurveGridCodingKey("id"))
         datasetSchemaID = try container.decode(
             String.self,
