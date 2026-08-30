@@ -3,14 +3,15 @@ import Testing
 @testable import OpenStar
 
 struct WorkloadCatalogTests {
-    @Test func existingHandlersAndCapabilitiesRemainRegisteredInOrder() throws {
+    @Test func legacyHandlersAndCapabilitiesRemainRegisteredFirst() throws {
         let handlers = try WorkloadCatalog.handlers()
+        let legacyHandlers = Array(handlers.prefix(2))
 
-        #expect(handlers.map(\.workloadIDs) == [
+        #expect(legacyHandlers.map(\.workloadIDs) == [
             ["openstar.lomb-scargle.v1", "openstar.tess-period-search.v1"],
             ["openstar.box-period-search.v1"]
         ])
-        #expect(handlers.flatMap(\.capabilities) == [
+        #expect(legacyHandlers.flatMap(\.capabilities) == [
             WorkloadCapability(
                 workloadID: "openstar.lomb-scargle.v1",
                 executionBackends: [.metal],
@@ -29,11 +30,34 @@ struct WorkloadCatalogTests {
         ])
     }
 
-    @Test func futureModulesAdvertiseNothing() throws {
-        #expect(try CurveGridWorkloadModule.handlers().isEmpty)
-        #expect(try SignalCorrelationWorkloadModule.handlers().isEmpty)
-        #expect(try SeasonalChangePointWorkloadModule.handlers().isEmpty)
-        #expect(try HarmonicGridWorkloadModule.handlers().isEmpty)
+    @Test func catalogIncludesModuleHandlersInOrder() throws {
+        let catalogHandlers = try WorkloadCatalog.handlers()
+
+        var moduleHandlers: [any OpenStarWorkloadHandler] = []
+        moduleHandlers.append(
+            contentsOf: try CurveGridWorkloadModule.handlers()
+        )
+        moduleHandlers.append(
+            contentsOf: try SignalCorrelationWorkloadModule.handlers()
+        )
+        moduleHandlers.append(
+            contentsOf: try SeasonalChangePointWorkloadModule.handlers()
+        )
+        moduleHandlers.append(
+            contentsOf: try HarmonicGridWorkloadModule.handlers()
+        )
+
+        let catalogModuleHandlers = Array(catalogHandlers.dropFirst(2))
+
+        #expect(catalogHandlers.count == 2 + moduleHandlers.count)
+        #expect(
+            catalogModuleHandlers.map(\.workloadIDs)
+                == moduleHandlers.map(\.workloadIDs)
+        )
+        #expect(
+            catalogModuleHandlers.flatMap(\.capabilities)
+                == moduleHandlers.flatMap(\.capabilities)
+        )
     }
 
     @Test func catalogConstructionIsDeterministic() throws {
@@ -135,7 +159,10 @@ struct WorkloadCatalogTests {
             ))
         )
 
-        #expect(workResult(for: member, nodeID: UUID()).resultSchemaID == "result.v1")
+        #expect(
+            workResult(for: member, nodeID: UUID()).resultSchemaID
+                == "result.v1"
+        )
     }
 
     @Test func failedResultEchoesResultSchemaIdentity() {
@@ -144,7 +171,10 @@ struct WorkloadCatalogTests {
             result: .failure(WorkloadCancellation())
         )
 
-        #expect(workResult(for: member, nodeID: UUID()).resultSchemaID == "result.v1")
+        #expect(
+            workResult(for: member, nodeID: UUID()).resultSchemaID
+                == "result.v1"
+        )
     }
 
     private func encodedObject<T: Encodable>(
@@ -170,13 +200,20 @@ private struct CatalogTestHandler: OpenStarWorkloadHandler {
     init(workloadID: String) {
         workloadIDs = [workloadID]
         capabilities = [.init(
-            workloadID: workloadID, executionBackends: [.cpu], validatorID: nil
+            workloadID: workloadID,
+            executionBackends: [.cpu],
+            validatorID: nil
         )]
     }
 
-    func execute(workUnit: WorkUnit, datasetData: Data?) async throws -> WorkloadExecution {
+    func execute(
+        workUnit: WorkUnit,
+        datasetData: Data?
+    ) async throws -> WorkloadExecution {
         WorkloadExecution(
-            duration: 0, payload: .null, summary: nil,
+            duration: 0,
+            payload: .null,
+            summary: nil,
             legacyResultFields: .none
         )
     }
