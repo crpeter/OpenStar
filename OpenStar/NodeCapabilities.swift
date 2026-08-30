@@ -178,6 +178,12 @@ struct WorkUnit: Codable, Identifiable, Sendable {
     let projectID: String
     let workloadID: String
 
+    // Optional immutable contract identities. Their absence preserves the
+    // existing coordinator wire format and workload decoding behavior.
+    let datasetSchemaID: String?
+    let payloadSchemaID: String?
+    let resultSchemaID: String?
+
     // Dataset identity is a generic OpenStar concept. The coordinator and
     // worker runtime do not interpret the dataset contents.
     let datasetID: String?
@@ -191,6 +197,34 @@ struct WorkUnit: Codable, Identifiable, Sendable {
     let startFrequency: Double?
     let frequencyStep: Double?
     let frequencyCount: Int?
+
+    init(
+        id: UUID,
+        projectID: String,
+        workloadID: String,
+        datasetSchemaID: String? = nil,
+        payloadSchemaID: String? = nil,
+        resultSchemaID: String? = nil,
+        datasetID: String? = nil,
+        payload: JSONValue? = nil,
+        frequencyStartIndex: Int? = nil,
+        startFrequency: Double? = nil,
+        frequencyStep: Double? = nil,
+        frequencyCount: Int? = nil
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.workloadID = workloadID
+        self.datasetSchemaID = datasetSchemaID
+        self.payloadSchemaID = payloadSchemaID
+        self.resultSchemaID = resultSchemaID
+        self.datasetID = datasetID
+        self.payload = payload
+        self.frequencyStartIndex = frequencyStartIndex
+        self.startFrequency = startFrequency
+        self.frequencyStep = frequencyStep
+        self.frequencyCount = frequencyCount
+    }
 }
 
 
