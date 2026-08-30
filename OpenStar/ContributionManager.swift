@@ -29,6 +29,36 @@ func classifyWorkFailure(_ error: Error) -> WorkFailureKind {
     return .unknown
 }
 
+nonisolated
+func workResult(
+    for member: WorkloadBatchMember,
+    nodeID: UUID
+) -> WorkResult {
+    switch member.result {
+    case .success(let execution):
+        let legacy = execution.legacyResultFields
+        return WorkResult(
+            workUnitID: member.workUnit.id, nodeID: nodeID,
+            status: .completed, duration: execution.duration,
+            resultSchemaID: member.workUnit.resultSchemaID,
+            payload: execution.payload, errorMessage: nil,
+            failureKind: nil,
+            bestFrequency: legacy.bestFrequency,
+            bestPeriodDays: legacy.bestPeriodDays,
+            bestPower: legacy.bestPower
+        )
+    case .failure(let error):
+        return WorkResult(
+            workUnitID: member.workUnit.id, nodeID: nodeID,
+            status: .failed, duration: nil,
+            resultSchemaID: member.workUnit.resultSchemaID,
+            payload: nil, errorMessage: error.localizedDescription,
+            failureKind: classifyWorkFailure(error),
+            bestFrequency: nil, bestPeriodDays: nil, bestPower: nil
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class ContributionManager {
@@ -253,34 +283,16 @@ final class ContributionManager {
 
                     for member in members {
                         currentWorkUnitID = member.workUnit.id
-                        let result: WorkResult
                         switch member.result {
                         case .success(let execution):
                             unitsCompleted += 1
                             totalComputeSeconds += execution.duration
                             lastWorkUnitDuration = execution.duration
                             lastResultSummary = execution.summary
-                            let legacy = execution.legacyResultFields
-                            result = WorkResult(
-                                workUnitID: member.workUnit.id, nodeID: nodeID,
-                                status: .completed, duration: execution.duration,
-                                payload: execution.payload, errorMessage: nil,
-                                failureKind: nil,
-                                bestFrequency: legacy.bestFrequency,
-                                bestPeriodDays: legacy.bestPeriodDays,
-                                bestPower: legacy.bestPower
-                            )
-                        case .failure(let error):
-                            result = WorkResult(
-                                workUnitID: member.workUnit.id, nodeID: nodeID,
-                                status: .failed, duration: nil, payload: nil,
-                                errorMessage: error.localizedDescription,
-                                failureKind: classifyFailure(error),
-                                bestFrequency: nil, bestPeriodDays: nil,
-                                bestPower: nil
-                            )
+                        case .failure:
+                            break
                         }
-                        submissionResults.append(result)
+                        submissionResults.append(workResult(for: member, nodeID: nodeID))
                     }
 
                     isSubmitting = true

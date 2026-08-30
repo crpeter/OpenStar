@@ -138,10 +138,7 @@ final class WorkloadRouter: @unchecked Sendable {
     }
 
     convenience init() throws {
-        try self.init(handlers: [
-            try LombScargleWorker(preparedDatasetCacheCapacity: 32),
-            BoxPeriodSearchWorker()
-        ])
+        try self.init(handlers: WorkloadCatalog.handlers())
     }
 
     init(handlers: [any OpenStarWorkloadHandler]) throws {
