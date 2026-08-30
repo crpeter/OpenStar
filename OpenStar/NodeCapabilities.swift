@@ -135,6 +135,25 @@ struct WorkloadCapability: Codable, Sendable, Hashable {
     let workloadID: String
     let executionBackends: [ComputeBackend]
     let validatorID: String?
+    let datasetSchemaID: String?
+    let payloadSchemaID: String?
+    let resultSchemaID: String?
+
+    init(
+        workloadID: String,
+        executionBackends: [ComputeBackend],
+        validatorID: String?,
+        datasetSchemaID: String? = nil,
+        payloadSchemaID: String? = nil,
+        resultSchemaID: String? = nil
+    ) {
+        self.workloadID = workloadID
+        self.executionBackends = executionBackends
+        self.validatorID = validatorID
+        self.datasetSchemaID = datasetSchemaID
+        self.payloadSchemaID = payloadSchemaID
+        self.resultSchemaID = resultSchemaID
+    }
 }
 
 nonisolated
@@ -276,6 +295,7 @@ struct WorkResult: Codable, Sendable {
     let nodeID: UUID
     let status: WorkResultStatus
     let duration: Double?
+    let resultSchemaID: String?
 
     // Generic workload-defined result.
     let payload: JSONValue?
@@ -291,6 +311,32 @@ struct WorkResult: Codable, Sendable {
     let bestFrequency: Double?
     let bestPeriodDays: Double?
     let bestPower: Double?
+
+    init(
+        workUnitID: UUID,
+        nodeID: UUID,
+        status: WorkResultStatus,
+        duration: Double?,
+        resultSchemaID: String? = nil,
+        payload: JSONValue?,
+        errorMessage: String?,
+        failureKind: WorkFailureKind?,
+        bestFrequency: Double?,
+        bestPeriodDays: Double?,
+        bestPower: Double?
+    ) {
+        self.workUnitID = workUnitID
+        self.nodeID = nodeID
+        self.status = status
+        self.duration = duration
+        self.resultSchemaID = resultSchemaID
+        self.payload = payload
+        self.errorMessage = errorMessage
+        self.failureKind = failureKind
+        self.bestFrequency = bestFrequency
+        self.bestPeriodDays = bestPeriodDays
+        self.bestPower = bestPower
+    }
 }
 
 nonisolated

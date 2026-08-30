@@ -29,11 +29,11 @@ struct WorkloadCatalogTests {
         ])
     }
 
-    @Test func futureModulesAdvertiseNothing() {
-        #expect(CurveGridWorkloadModule.handlers().isEmpty)
-        #expect(SignalCorrelationWorkloadModule.handlers().isEmpty)
-        #expect(SeasonalChangePointWorkloadModule.handlers().isEmpty)
-        #expect(HarmonicGridWorkloadModule.handlers().isEmpty)
+    @Test func futureModulesAdvertiseNothing() throws {
+        #expect(try CurveGridWorkloadModule.handlers().isEmpty)
+        #expect(try SignalCorrelationWorkloadModule.handlers().isEmpty)
+        #expect(try SeasonalChangePointWorkloadModule.handlers().isEmpty)
+        #expect(try HarmonicGridWorkloadModule.handlers().isEmpty)
     }
 
     @Test func catalogConstructionIsDeterministic() throws {
@@ -77,6 +77,89 @@ struct WorkloadCatalogTests {
         #expect(unit.datasetSchemaID == nil)
         #expect(unit.payloadSchemaID == nil)
         #expect(unit.resultSchemaID == nil)
+    }
+
+    @Test func schemaAwareCapabilityEncodesAllSchemaIdentities() throws {
+        let capability = WorkloadCapability(
+            workloadID: "schema-aware",
+            executionBackends: [.cpu],
+            validatorID: nil,
+            datasetSchemaID: "dataset.v1",
+            payloadSchemaID: "payload.v1",
+            resultSchemaID: "result.v1"
+        )
+        let encoded = try encodedObject(capability)
+        let object = try #require(encoded)
+
+        #expect(object["datasetSchemaID"] as? String == "dataset.v1")
+        #expect(object["payloadSchemaID"] as? String == "payload.v1")
+        #expect(object["resultSchemaID"] as? String == "result.v1")
+    }
+
+    @Test func legacyCapabilityOmitsNilSchemaIdentities() throws {
+        let capability = WorkloadCapability(
+            workloadID: "legacy", executionBackends: [.cpu], validatorID: nil
+        )
+        let encoded = try encodedObject(capability)
+        let object = try #require(encoded)
+
+        #expect(object["datasetSchemaID"] == nil)
+        #expect(object["payloadSchemaID"] == nil)
+        #expect(object["resultSchemaID"] == nil)
+    }
+
+    @Test func workUnitDecodesSchemaIdentityTuple() throws {
+        let id = UUID()
+        let unit = try JSONDecoder().decode(
+            WorkUnit.self,
+            from: Data(
+                """
+                {"id":"\(id.uuidString)","projectID":"p","workloadID":"w",\
+                "datasetSchemaID":"dataset.v1","payloadSchemaID":"payload.v1",\
+                "resultSchemaID":"result.v1"}
+                """.utf8
+            )
+        )
+
+        #expect(unit.datasetSchemaID == "dataset.v1")
+        #expect(unit.payloadSchemaID == "payload.v1")
+        #expect(unit.resultSchemaID == "result.v1")
+    }
+
+    @Test func successfulResultEchoesResultSchemaIdentity() {
+        let member = WorkloadBatchMember(
+            workUnit: schemaWorkUnit(),
+            result: .success(WorkloadExecution(
+                duration: 1, payload: .null, summary: nil,
+                legacyResultFields: .none
+            ))
+        )
+
+        #expect(workResult(for: member, nodeID: UUID()).resultSchemaID == "result.v1")
+    }
+
+    @Test func failedResultEchoesResultSchemaIdentity() {
+        let member = WorkloadBatchMember(
+            workUnit: schemaWorkUnit(),
+            result: .failure(WorkloadCancellation())
+        )
+
+        #expect(workResult(for: member, nodeID: UUID()).resultSchemaID == "result.v1")
+    }
+
+    private func encodedObject<T: Encodable>(
+        _ value: T
+    ) throws -> [String: Any]? {
+        try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(value)
+        ) as? [String: Any]
+    }
+
+    private func schemaWorkUnit() -> WorkUnit {
+        WorkUnit(
+            id: UUID(), projectID: "project", workloadID: "workload",
+            resultSchemaID: "result.v1"
+        )
     }
 }
 

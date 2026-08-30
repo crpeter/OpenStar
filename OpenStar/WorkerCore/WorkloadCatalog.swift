@@ -16,10 +16,10 @@ enum WorkloadCatalog {
             BoxPeriodSearchWorker()
         ]
 
-        handlers.append(contentsOf: CurveGridWorkloadModule.handlers())
-        handlers.append(contentsOf: SignalCorrelationWorkloadModule.handlers())
-        handlers.append(contentsOf: SeasonalChangePointWorkloadModule.handlers())
-        handlers.append(contentsOf: HarmonicGridWorkloadModule.handlers())
+        handlers.append(contentsOf: try CurveGridWorkloadModule.handlers())
+        handlers.append(contentsOf: try SignalCorrelationWorkloadModule.handlers())
+        handlers.append(contentsOf: try SeasonalChangePointWorkloadModule.handlers())
+        handlers.append(contentsOf: try HarmonicGridWorkloadModule.handlers())
         return handlers
     }
 }

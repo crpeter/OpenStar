@@ -1,4 +1,4 @@
 nonisolated
 enum SignalCorrelationWorkloadModule {
-    static func handlers() -> [any OpenStarWorkloadHandler] { [] }
+    static func handlers() throws -> [any OpenStarWorkloadHandler] { [] }
 }

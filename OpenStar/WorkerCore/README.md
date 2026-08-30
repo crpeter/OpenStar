@@ -10,6 +10,6 @@ uniquely named `.metal` file whose functions have a workload-unique prefix.
 They must not be added to `OpenStarKernels.metal`.
 
 The current coordinator contract requires `WorkUnit.workloadID`. Optional
-dataset, payload, and result schema identities can accompany it without
-changing existing JSON. Adding identities to submitted results should be
-coordinated with the server before changing the outgoing wire representation.
+dataset, payload, and result schema identities can accompany capabilities and
+work units without changing legacy JSON. Result submissions echo a work unit's
+optional result schema identity so the immutable contract remains traceable.
