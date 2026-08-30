@@ -892,6 +892,7 @@ private struct CurveGridCodingKey: CodingKey {
     }
 }
 
+nonisolated
 private func curveGridRequireExactKeys(
     _ container: KeyedDecodingContainer<CurveGridCodingKey>,
     _ expected: Set<String>
@@ -908,7 +909,7 @@ private func curveGridRequireExactKeys(
 }
 
 extension CurveGridAxis {
-    init(from decoder: Decoder) throws {
+    nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CurveGridCodingKey.self)
         try curveGridRequireExactKeys(container, ["start", "step", "count"])
         start = try container.decode(Double.self, forKey: CurveGridCodingKey("start"))
@@ -918,7 +919,7 @@ extension CurveGridAxis {
 }
 
 extension CurveGridDefinition {
-    init(from decoder: Decoder) throws {
+    nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CurveGridCodingKey.self)
         try curveGridRequireExactKeys(container, [
             "familyID",
@@ -951,7 +952,7 @@ extension CurveGridDefinition {
 }
 
 extension CurveGridDataset {
-    init(from decoder: Decoder) throws {
+    nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CurveGridCodingKey.self)
         try curveGridRequireExactKeys(container, [
             "id",
