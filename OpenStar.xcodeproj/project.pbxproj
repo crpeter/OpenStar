@@ -34,8 +34,22 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				Workloads/CurveGrid/AGENTS.md,
+				Workloads/HarmonicGrid/AGENTS.md,
+				Workloads/SeasonalChangePoint/AGENTS.md,
+				Workloads/SignalCorrelation/AGENTS.md,
 			);
 			target = 57B999B33028FE4900701CD9 /* OpenStar */;
+		};
+		57BCEA9730447E5D0005BC9D /* Exceptions for "OpenStarTests" folder in "OpenStarTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Workloads/CurveGrid/AGENTS.md,
+				Workloads/HarmonicGrid/AGENTS.md,
+				Workloads/SeasonalChangePoint/AGENTS.md,
+				Workloads/SignalCorrelation/AGENTS.md,
+			);
+			target = 57B999C23028FE4A00701CD9 /* OpenStarTests */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -50,6 +64,9 @@
 		};
 		57B999C63028FE4A00701CD9 /* OpenStarTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				57BCEA9730447E5D0005BC9D /* Exceptions for "OpenStarTests" folder in "OpenStarTests" target */,
+			);
 			path = OpenStarTests;
 			sourceTree = "<group>";
 		};
