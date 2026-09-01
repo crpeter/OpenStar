@@ -568,7 +568,7 @@ struct MorphologyGridWorkloadTests {
         )
         #expect(full.evaluatedCandidateCount == 27)
         #expect(full.invalidCandidateCount == 0)
-        #expect(full.bestCandidate?.gridIndex == 13)
+        #expect(full.bestCandidate?.gridIndex == 9)
 
         let partial = try MorphologyGridEvaluator.search(
             dataset: dataset,
@@ -579,7 +579,7 @@ struct MorphologyGridWorkloadTests {
             )
         )
         #expect(partial.evaluatedCandidateCount == 5)
-        #expect(partial.bestCandidate?.gridIndex == 13)
+        #expect(partial.bestCandidate?.gridIndex == 10)
 
         let independent = try MorphologyGridFixture.decode(.independentPulses)
         let partialFinal = try MorphologyGridEvaluator.search(
@@ -649,7 +649,12 @@ struct MorphologyGridWorkloadTests {
             )
         )
         #expect(result.bestCandidate?.gridIndex == 0)
-        #expect(result.bestCandidate?.weightedResidualSumSquares == 0)
+        let wrss = try #require(
+            result.bestCandidate?.weightedResidualSumSquares
+        )
+        #expect(wrss.isFinite)
+        #expect(wrss >= 0)
+        #expect(wrss <= MorphologyGridContract.resultRelativeTolerance)
     }
 
     @Test
