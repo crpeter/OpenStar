@@ -46,9 +46,50 @@ struct WorkloadCatalogTests {
         moduleHandlers.append(
             contentsOf: try HarmonicGridWorkloadModule.handlers()
         )
+        let morphologyHandlers = try MorphologyGridWorkloadModule.handlers()
+        moduleHandlers.append(contentsOf: morphologyHandlers)
 
         let catalogModuleHandlers = Array(catalogHandlers.dropFirst(2))
 
+        #expect(catalogHandlers.map(\.workloadIDs) == [
+            ["openstar.lomb-scargle.v1", "openstar.tess-period-search.v1"],
+            ["openstar.box-period-search.v1"],
+            ["openstar.curve-grid.v1"],
+            ["openstar.morphology-grid.v1"]
+        ])
+        #expect(catalogHandlers.flatMap(\.capabilities) == [
+            WorkloadCapability(
+                workloadID: "openstar.lomb-scargle.v1",
+                executionBackends: [.metal],
+                validatorID: LombScargleValidation.validatorID
+            ),
+            WorkloadCapability(
+                workloadID: "openstar.tess-period-search.v1",
+                executionBackends: [.metal],
+                validatorID: LombScargleValidation.validatorID
+            ),
+            WorkloadCapability(
+                workloadID: "openstar.box-period-search.v1",
+                executionBackends: [.cpu],
+                validatorID: nil
+            ),
+            WorkloadCapability(
+                workloadID: "openstar.curve-grid.v1",
+                executionBackends: [.cpu],
+                validatorID: "openstar.curve-grid.local-double.v1",
+                datasetSchemaID: "openstar.dataset.curve-grid.v1",
+                payloadSchemaID: "openstar.payload.curve-grid-shard.v1",
+                resultSchemaID: "openstar.result.curve-grid-shard.v1"
+            ),
+            WorkloadCapability(
+                workloadID: "openstar.morphology-grid.v1",
+                executionBackends: [.cpu],
+                validatorID: "openstar.morphology-grid.local-double.v1",
+                datasetSchemaID: "openstar.dataset.morphology-grid.v1",
+                payloadSchemaID: "openstar.payload.morphology-grid-shard.v1",
+                resultSchemaID: "openstar.result.morphology-grid-shard.v1"
+            )
+        ])
         #expect(catalogHandlers.count == 2 + moduleHandlers.count)
         #expect(
             catalogModuleHandlers.map(\.workloadIDs)
@@ -58,6 +99,29 @@ struct WorkloadCatalogTests {
             catalogModuleHandlers.flatMap(\.capabilities)
                 == moduleHandlers.flatMap(\.capabilities)
         )
+        #expect(
+            catalogHandlers.flatMap(\.workloadIDs).filter {
+                $0 == "openstar.morphology-grid.v1"
+            }.count == 1
+        )
+        #expect(morphologyHandlers.count == 1)
+
+        let morphologyHandler = try #require(morphologyHandlers.first)
+        #expect(morphologyHandler.workloadIDs == [
+            "openstar.morphology-grid.v1"
+        ])
+        #expect(morphologyHandler.capabilities == [WorkloadCapability(
+            workloadID: "openstar.morphology-grid.v1",
+            executionBackends: [.cpu],
+            validatorID: "openstar.morphology-grid.local-double.v1",
+            datasetSchemaID: "openstar.dataset.morphology-grid.v1",
+            payloadSchemaID: "openstar.payload.morphology-grid-shard.v1",
+            resultSchemaID: "openstar.result.morphology-grid-shard.v1"
+        )])
+        let morphologyBatchHandler = try #require(
+            morphologyHandler as? MorphologyGridWorkloadHandler
+        )
+        #expect(morphologyBatchHandler.desiredBatchCount == 8)
     }
 
     @Test func catalogConstructionIsDeterministic() throws {
