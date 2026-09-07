@@ -48,6 +48,7 @@ struct WorkloadCatalogTests {
         )
         let morphologyHandlers = try MorphologyGridWorkloadModule.handlers()
         moduleHandlers.append(contentsOf: morphologyHandlers)
+        moduleHandlers.append(contentsOf: try SupportedMorphologyGridWorkloadModule.handlers())
 
         let catalogModuleHandlers = Array(catalogHandlers.dropFirst(2))
 
@@ -55,7 +56,8 @@ struct WorkloadCatalogTests {
             ["openstar.lomb-scargle.v1", "openstar.tess-period-search.v1"],
             ["openstar.box-period-search.v1"],
             ["openstar.curve-grid.v1"],
-            ["openstar.morphology-grid.v1"]
+            ["openstar.morphology-grid.v1"],
+            ["openstar.supported-morphology-grid.v1"]
         ])
         #expect(catalogHandlers.flatMap(\.capabilities) == [
             WorkloadCapability(
@@ -88,6 +90,14 @@ struct WorkloadCatalogTests {
                 datasetSchemaID: "openstar.dataset.morphology-grid.v1",
                 payloadSchemaID: "openstar.payload.morphology-grid-shard.v1",
                 resultSchemaID: "openstar.result.morphology-grid-shard.v1"
+            ),
+            WorkloadCapability(
+                workloadID: "openstar.supported-morphology-grid.v1",
+                executionBackends: [.cpu],
+                validatorID: "openstar.supported-morphology-grid.local-double.v1",
+                datasetSchemaID: "openstar.dataset.supported-morphology-grid.v1",
+                payloadSchemaID: "openstar.payload.supported-morphology-grid-shard.v1",
+                resultSchemaID: "openstar.result.supported-morphology-grid-shard.v1"
             )
         ])
         #expect(catalogHandlers.count == 2 + moduleHandlers.count)
@@ -122,6 +132,19 @@ struct WorkloadCatalogTests {
             morphologyHandler as? MorphologyGridWorkloadHandler
         )
         #expect(morphologyBatchHandler.desiredBatchCount == 8)
+    }
+
+    @Test func supportedMorphologyHandlerIsRegisteredExactlyOnce() throws {
+        let handlers = try WorkloadCatalog.handlers()
+        let supported = handlers.filter {
+            $0.workloadIDs.contains("openstar.supported-morphology-grid.v1")
+        }
+        #expect(supported.count == 1)
+        let handler = try #require(supported.first as? SupportedMorphologyGridWorkloadHandler)
+        #expect(handler.desiredBatchCount == 8)
+        #expect(handler.workloadIDs == ["openstar.supported-morphology-grid.v1"])
+        #expect(try SupportedMorphologyGridWorkloadModule.handlers().count == 1)
+        #expect(MorphologyGridWorkloadHandler().workloadIDs == ["openstar.morphology-grid.v1"])
     }
 
     @Test func catalogConstructionIsDeterministic() throws {

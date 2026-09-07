@@ -21,6 +21,7 @@ enum WorkloadCatalog {
         handlers.append(contentsOf: try SeasonalChangePointWorkloadModule.handlers())
         handlers.append(contentsOf: try HarmonicGridWorkloadModule.handlers())
         handlers.append(contentsOf: try MorphologyGridWorkloadModule.handlers())
+        handlers.append(contentsOf: try SupportedMorphologyGridWorkloadModule.handlers())
         return handlers
     }
 }
