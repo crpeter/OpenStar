@@ -38,6 +38,7 @@
 				Workloads/HarmonicGrid/AGENTS.md,
 				Workloads/SeasonalChangePoint/AGENTS.md,
 				Workloads/SignalCorrelation/AGENTS.md,
+				Workloads/SupportedMorphologyGrid/README.md,
 			);
 			target = 57B999B33028FE4900701CD9 /* OpenStar */;
 		};
