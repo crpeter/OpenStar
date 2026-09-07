@@ -21,8 +21,8 @@ struct SupportedMorphologyGridWorkloadTests {
     @Test func unsupportedNumericalWinnerLosesToSupportedCandidate() throws {
         let object = Fixture.object(positiveCenter: 0)
         let numerical = try Fixture.numericalDataset(object)
-        let rejected = try #require(MorphologyGridEvaluator.evaluateCandidate(dataset: numerical, gridIndex: 0))
-        let admitted = try #require(MorphologyGridEvaluator.evaluateCandidate(dataset: numerical, gridIndex: 1))
+        let rejected = try #require(try MorphologyGridEvaluator.evaluateCandidate(dataset: numerical, gridIndex: 0))
+        let admitted = try #require(try MorphologyGridEvaluator.evaluateCandidate(dataset: numerical, gridIndex: 1))
         #expect(rejected.weightedResidualSumSquares < admitted.weightedResidualSumSquares - 1e-9)
         #expect(MorphologyGridEvaluator.candidatePrecedes(rejected, admitted))
 
@@ -90,7 +90,7 @@ struct SupportedMorphologyGridWorkloadTests {
             #expect(try !supported(parameters, coordinates: [coordinate], weights: [0]))
         }
         #expect(try !supported(parameters, coordinates: [(-2.0).nextDown]))
-        #expect(try !supported(parameters, coordinates: [2.0.nextUp]))
+        #expect(try !supported(parameters, coordinates: [(2.0).nextUp]))
         #expect(try !supported(parameters, coordinates: [0, 3], weights: [0, 1]))
         #expect(try supported(parameters, coordinates: [0], weights: [Double.leastNonzeroMagnitude]))
 
