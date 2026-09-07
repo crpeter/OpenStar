@@ -157,6 +157,7 @@ private enum SupportedMorphologyGridNumericalAdapter {
     private enum IdentityKey: String, CodingKey {
         case datasetSchemaID, morphologyFamilyID, componentTemplateFamilyID
         case executionContractID, executionContractVersion, supportPolicyID
+        case workloadID, payloadSchemaID, resultSchemaID
     }
 
     static func decodeDataset(from decoder: Decoder) throws -> MorphologyGridDataset {
@@ -170,6 +171,16 @@ private enum SupportedMorphologyGridNumericalAdapter {
             (.supportPolicyID, SupportedMorphologyGridContract.supportPolicyID),
         ]
         for (key, expected) in required {
+            guard try identities.decode(String.self, forKey: key) == expected else {
+                throw MorphologyGridError.invalidDataset("\(key.rawValue) is invalid")
+            }
+        }
+        let optional: [(IdentityKey, String)] = [
+            (.workloadID, SupportedMorphologyGridContract.workloadID),
+            (.payloadSchemaID, SupportedMorphologyGridContract.payloadSchemaID),
+            (.resultSchemaID, SupportedMorphologyGridContract.resultSchemaID),
+        ]
+        for (key, expected) in optional where identities.contains(key) {
             guard try identities.decode(String.self, forKey: key) == expected else {
                 throw MorphologyGridError.invalidDataset("\(key.rawValue) is invalid")
             }

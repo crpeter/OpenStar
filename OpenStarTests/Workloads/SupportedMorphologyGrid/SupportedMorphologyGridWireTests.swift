@@ -59,6 +59,48 @@ struct SupportedMorphologyGridWireTests {
         }
     }
 
+    @Test func optionalDatasetIdentitiesAreValidatedWhenPresent() throws {
+        let fields = [
+            ("workloadID", SupportedMorphologyGridContract.workloadID, MorphologyGridContract.workloadID),
+            ("payloadSchemaID", SupportedMorphologyGridContract.payloadSchemaID, MorphologyGridContract.payloadSchemaID),
+            ("resultSchemaID", SupportedMorphologyGridContract.resultSchemaID, MorphologyGridContract.resultSchemaID),
+        ]
+        for model in Fixture.models {
+            for (key, expected, oldIdentity) in fields {
+                var object = Fixture.object(model: model)
+                object["opaqueMetadata"] = ["workloadID": "unrelated metadata"]
+                object["reference"] = NSNull()
+                #expect(object[key] == nil)
+                #expect(try Fixture.decode(object).modelClassID == model)
+
+                object[key] = expected
+                #expect(try Fixture.decode(object).modelClassID == model)
+
+                for invalid in ["unknown", oldIdentity, NSNull(), 1, true, [expected], ["value": expected]] as [Any] {
+                    object[key] = invalid
+                    #expect(throws: MorphologyGridError.self) { try Fixture.decode(object) }
+                }
+            }
+            var allPresent = Fixture.object(model: model)
+            for (key, expected, _) in fields { allPresent[key] = expected }
+            #expect(try Fixture.decode(allPresent).modelClassID == model)
+        }
+    }
+
+    @Test func optionalDatasetIdentityRejectionPrecedesNumericalDecoding() throws {
+        for key in ["workloadID", "payloadSchemaID", "resultSchemaID"] {
+            var object = Fixture.object()
+            object[key] = "unknown"
+            object["morphologyGrid"] = NSNull()
+            do {
+                _ = try Fixture.decode(object)
+                Issue.record("Expected optional identity rejection")
+            } catch let error as MorphologyGridError {
+                #expect(error == .invalidDataset("\(key) is invalid"))
+            }
+        }
+    }
+
     @Test func nestedStructuresRemainStrictForEveryModel() throws {
         for model in Fixture.models {
             let original = Fixture.object(model: model)
